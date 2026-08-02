@@ -1,4 +1,5 @@
 from decimal import Decimal
+from pathlib import Path
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -30,6 +31,15 @@ class Settings(BaseSettings):
     market_overrides_path: str = "config/market_overrides.yaml"
 
     real_trading_enabled: bool = False
+    execution_enabled: bool = False
+    execution_confirmation: SecretStr | None = None
+    closed_only: bool = True
+    keystore_path: str | None = None
+    max_trade_fraction: Decimal = Field(default=Decimal("0.05"), gt=0, le=Decimal("0.05"))
+    max_exposure_fraction: Decimal = Field(default=Decimal("0.25"), gt=0, le=Decimal("0.25"))
+    max_daily_loss_fraction: Decimal = Field(default=Decimal("0.10"), gt=0, le=Decimal("0.10"))
+    geoblock_url: str = "https://polymarket.com/api/geoblock"
+    hermes_mcp_enabled: bool = True
     polymarket_websocket_enabled: bool = False
     gamma_api_url: str = "https://gamma-api.polymarket.com"
     clob_api_url: str = "https://clob.polymarket.com"
@@ -44,7 +54,20 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     @model_validator(mode="after")
-    def reject_real_trading(self) -> "Settings":
+    def validate_execution_mode(self) -> "Settings":
         if self.real_trading_enabled:
-            raise ValueError("real trading is permanently disabled in WeatherEdge v1")
+            raise ValueError("real trading requires explicit execution settings")
+        if not self.execution_enabled:
+            return self
+        confirmation = (
+            self.execution_confirmation.get_secret_value() if self.execution_confirmation else None
+        )
+        if confirmation != "ENABLE_FORECASTFOUNDRY_LIVE_EXECUTION":
+            raise ValueError("execution confirmation is required")
+        if not self.closed_only:
+            raise ValueError("closed_only must be true for live execution")
+        if not self.keystore_path:
+            raise ValueError("keystore_path is required for live execution")
+        if not Path(self.keystore_path).is_absolute():
+            raise ValueError("keystore_path must be absolute for live execution")
         return self
