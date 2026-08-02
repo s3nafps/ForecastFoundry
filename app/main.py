@@ -14,6 +14,7 @@ from app.api import router as api_router
 from app.config import Settings
 from app.dashboard import router as dashboard_router
 from app.database import make_engine, make_session_factory
+from app.logging import configure_logging
 from app.models import ApplicationSetting, OrderBookSnapshot, Outcome, ProviderError
 from app.schemas import OrderBook
 from app.services.forecast import OpenMeteoProvider
@@ -30,6 +31,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if resolved.app_env != "test":
+            configure_logging(
+                resolved.log_level,
+                secrets=(
+                    resolved.telegram_bot_token.get_secret_value()
+                    if resolved.telegram_bot_token
+                    else "",
+                ),
+            )
         engine = make_engine(resolved.database_url)
         sessions = make_session_factory(engine)
         raw_http = httpx.AsyncClient(timeout=resolved.http_timeout_seconds)

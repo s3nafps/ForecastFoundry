@@ -8,16 +8,30 @@ class JsonFormatter(logging.Formatter):
         super().__init__()
         self._secrets = tuple(secret for secret in secrets if secret)
 
-    def format(self, record: logging.LogRecord) -> str:
-        message = record.getMessage()
+    def _redact(self, value: str) -> str:
         for secret in self._secrets:
-            message = message.replace(secret, "[REDACTED]")
+            value = value.replace(secret, "[REDACTED]")
+        return value
+
+    def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, object] = {
             "timestamp": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": message,
+            "message": self._redact(record.getMessage()),
         }
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = self._redact(self.formatException(record.exc_info))
         return json.dumps(payload, ensure_ascii=False)
+
+
+def configure_logging(level: str, *, secrets: tuple[str, ...] = ()) -> None:
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonFormatter(secrets=secrets))
+    root = logging.getLogger()
+    root.handlers = [handler]
+    root.setLevel(level.upper())
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logger = logging.getLogger(name)
+        logger.handlers = []
+        logger.propagate = True
