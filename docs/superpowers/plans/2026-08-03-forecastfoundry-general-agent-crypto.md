@@ -1,8 +1,8 @@
-# WeatherEdge General Quantitative Agent and Crypto Execution Plan
+# ForecastFoundry General Quantitative Agent and Crypto Execution Plan
 
 ## Objective
 
-Extend the existing paper-only WeatherEdge service into a domain-pluggable quantitative Polymarket agent. Weather remains supported, BTC/ETH threshold and up/down markets become the first additional domain, Hermes Agent is an optional local MCP control/research client, and live execution is implemented behind explicit fail-closed gates. Paper mode remains the default and no live order is sent by tests or local startup.
+Extend the existing paper-only WeatherEdge service into **ForecastFoundry**, a domain-pluggable quantitative prediction-market agent. Weather remains supported, BTC/ETH threshold and up/down markets become the first additional domain, and OpenClaw, Codex CLI, Claude Code, or no external agent can use the same MCP/CLI/API surfaces. Live execution is implemented behind explicit fail-closed gates. Paper mode remains the default and no live order is sent by tests or local startup.
 
 ## Architecture and boundaries
 
@@ -11,6 +11,9 @@ Extend the existing paper-only WeatherEdge service into a domain-pluggable quant
 - Keep `app/services/polymarket.py` for public discovery/order-book reads. Add a separate official Polymarket unified SDK adapter for authenticated execution; never mix private-key code into the public adapter.
 - Keep research sources (X, Reddit, GitHub) timestamped and provenance-tagged. They may explain or provide backtest features, but cannot authorize a trade or override resolution evidence.
 - Isolate the executor from Hermes MCP. MCP exposes read/research/pause/reconcile tools only; it never receives a wallet key and has no order-signing or risk-mutating tool.
+- Keep the MCP contract client-neutral so OpenClaw, Codex CLI, and Claude Code use the same restricted stdio server; add thin configuration examples instead of client-specific business logic.
+- Ship stable `forecastfoundry` CLI commands and JSON/OpenAPI responses so scripts and agents can operate without MCP or a particular model vendor.
+- Keep the community edition open-source and monetize managed hosting, premium licensed data, enterprise controls, support, and commercial embedding rather than promising returns or taking custody of customer funds.
 - Live execution requires both `EXECUTION_ENABLED=true` and an explicit confirmation value, valid caps, an encrypted dedicated keystore, a passing geoblock check, and a fresh revalidation snapshot. Any failure pauses new entries.
 
 ## Toolchain
@@ -18,6 +21,21 @@ Extend the existing paper-only WeatherEdge service into a domain-pluggable quant
 - Python 3.12, existing dependencies, plus the official Polymarket `polymarket-client` SDK selected from `Polymarket/py-sdk`, `cryptography` for the local encrypted keystore, and the official Python MCP SDK for the stdio server.
 - Standard-library `math`, `statistics`, `random`, `decimal`, and `zoneinfo` for deterministic crypto calculations; do not add a numerical framework for the first implementation.
 - Existing pytest/pytest-asyncio, Ruff, mypy, Alembic, Docker Compose, and the current SQLite test helpers.
+
+## Rebrand and compatibility task
+
+The first implementation task is the ForecastFoundry rebrand and compatibility boundary. Keep the `app` import package, historical Alembic revisions, existing table names, and the `weatheredge.db` default path stable while changing display/package/CLI/Docker names. Preserve old environment names as deprecated aliases until a versioned breaking release.
+
+### 0. Rebrand and add agent-neutral interfaces
+
+Files: `pyproject.toml`, `app/main.py`, `app/__init__.py`, `app/api.py`, `app/dashboard.py`, `app/templates/base.html`, `.env.example`, `docker-compose.yml`, `Dockerfile`, new `app/cli.py`, new `app/mcp_server.py`, new `integrations/openclaw/openclaw.json`, new `integrations/codex/config.toml`, new `integrations/claude/.mcp.json`, new `docs/integrations.md`, `tests/test_branding.py`, `tests/test_cli_contract.py`.
+
+1. Add failing tests for the public product name, `forecastfoundry` distribution/CLI metadata, stable `app` imports, preserved database path, and paper-mode defaults; run `.\.venv\Scripts\python.exe -m pytest tests/test_branding.py tests/test_cli_contract.py -q` and observe red failures.
+2. Rename display strings, package metadata, executable name, Docker project/service labels, and documentation to ForecastFoundry. Keep historical storage/table identifiers and add a compatibility version field.
+3. Implement the CLI as a thin adapter over existing services with `scan`, `backtest`, `status`, `reconcile`, `pause`, and `mcp` commands; support stable JSON output and no live mode by default.
+4. Implement the restricted MCP server once, then add OpenClaw, Codex CLI, and Claude Code configuration examples that invoke the same stdio command. Do not add client-specific domain or execution logic.
+5. Run `.\.venv\Scripts\python.exe -m pytest tests/test_branding.py tests/test_cli_contract.py -q` and expect green; run `.\.venv\Scripts\python.exe -m ruff check app/cli.py app/mcp_server.py`.
+6. Commit: `git add pyproject.toml app app/templates .env.example docker-compose.yml Dockerfile integrations docs/integrations.md tests/test_branding.py tests/test_cli_contract.py && git commit -m "feat: rebrand as ForecastFoundry and add agent-neutral interfaces"`.
 
 ## Implementation tasks
 
@@ -122,16 +140,16 @@ Files: `app/worker.py`, `app/main.py`, `app/services/paper.py`, new `app/service
 5. Run `.\.venv\Scripts\python.exe -m pytest -q` and expect the original tests plus the new scan tests to pass. Run `.\.venv\Scripts\python.exe -m mypy app` and resolve all strict errors.
 6. Commit: `git add app/worker.py app/main.py app/services/paper.py app/services/agent_scan.py tests/test_agent_scan.py && git commit -m "feat: route weather and crypto through agent scans"`.
 
-### 10. Add the restricted Hermes MCP stdio server
+### 10. Add the restricted client-neutral MCP stdio server
 
-Files: `pyproject.toml`, new `app/mcp_server.py`, new `app/mcp_policy.py`, new `tests/test_mcp_server.py`, `config/hermes-mcp.json`.
+Files: `pyproject.toml`, `app/mcp_server.py`, `app/mcp_policy.py`, `tests/test_mcp_server.py`, `config/hermes-mcp.json`, `integrations/openclaw/openclaw.json`, `integrations/codex/config.toml`, `integrations/claude/.mcp.json`, `docs/integrations.md`.
 
 1. Add the official MCP Python dependency and write tests that enumerate the tool surface. The test must fail if `place_order`, `sign_order`, `set_risk_limits`, `wallet_transfer`, arbitrary HTTP, prompts, resources, or parallel calls are exposed.
 2. Implement only `list_supported_domains`, `scan_markets`, `get_market_evidence`, `explain_prediction`, `run_backtest`, `provider_health`, `portfolio_status`, `reconcile_orders`, `pause_execution`, and `resume_execution`.
 3. Require authenticated/audited pause/resume calls and route them through the local execution policy. MCP has no keystore or executor secret in its environment.
-4. Add a stdio launcher and Hermes configuration with an explicit tool allowlist and filtered environment. Keep autonomous scheduling functional when MCP is disabled.
+4. Add a stdio launcher and Hermes, OpenClaw, Codex CLI, and Claude Code configurations with an explicit tool allowlist and filtered environment. Keep autonomous scheduling functional when MCP is disabled.
 5. Run `.\.venv\Scripts\python.exe -m pytest tests/test_mcp_server.py -q`; run the MCP server in a subprocess with a harmless `list_supported_domains` call and assert clean JSON-RPC shutdown.
-6. Commit: `git add pyproject.toml app/mcp_server.py app/mcp_policy.py tests/test_mcp_server.py config/hermes-mcp.json && git commit -m "feat: add restricted Hermes MCP control surface"`.
+6. Commit: `git add pyproject.toml app/mcp_server.py app/mcp_policy.py tests/test_mcp_server.py config/hermes-mcp.json integrations docs/integrations.md && git commit -m "feat: add restricted agent-neutral MCP surface"`.
 
 ### 11. Expose status, research provenance, and operator controls
 
@@ -155,7 +173,7 @@ Files: `Dockerfile`, `docker-compose.yml`, `.dockerignore`, `.env.example`, new 
 
 ### 13. Final verification and paper-mode acceptance evidence
 
-Files: `tests/acceptance/`, `docs/superpowers/specs/2026-08-02-weatheredge-general-agent-design.md`, `README.md`.
+Files: `tests/acceptance/`, `docs/superpowers/specs/2026-08-02-weatheredge-general-agent-design.md`, `docs/superpowers/specs/2026-08-03-forecastfoundry-interoperability-and-commercialization-design.md`, `README.md`.
 
 1. Add recorded weather/crypto fixtures and acceptance tests for provider outage, stale source, ambiguous rules, geoblock, closed-only mode, insufficient balance, min-size rejection, partial fill, unknown order status, daily-loss stop, and MCP tool filtering.
 2. Run the complete gate:
@@ -169,6 +187,17 @@ Files: `tests/acceptance/`, `docs/superpowers/specs/2026-08-02-weatheredge-gener
 5. Scan implementation paths for accidental secret material with `rg -n "PRIVATE_KEY|API_KEY=|BEGIN (RSA|EC|OPENSSH) PRIVATE KEY" --glob "!\.venv/**" app tests config docker`; the command must return no secret material.
 6. Review the Polymarket terms, geoblock/jurisdiction, source licenses/attribution, and operator live-trading checklist before enabling any real account.
 7. Commit: `git add tests/acceptance docs/evidence README.md && git commit -m "test: add general agent acceptance evidence"`.
+
+### 14. Publish the open-source and commercial boundary
+
+Files: new `LICENSE`, new `NOTICE`, new `SECURITY.md`, new `CONTRIBUTING.md`, new `SUPPORT.md`, `README.md`, new `docs/commercial.md`, new `tests/test_repository_policy.py`.
+
+1. Add repository-policy tests first. Assert an OSI-approved license is present, the README makes no profit/performance guarantee, no customer funds are pooled or held, and the default configuration is paper-only; run `.\.venv\Scripts\python.exe -m pytest tests/test_repository_policy.py -q` and capture red failures.
+2. Add Apache-2.0 (preferred) or MIT license text, attribution/NOTICE rules, security reporting, contribution terms, and support boundaries. Do not add a non-commercial restriction to the open-source core.
+3. Document community features versus paid hosted/enterprise features: managed deployment, upgrades/backups, tenant controls, licensed premium data, audit exports, support/SLA, and commercial embedding licenses. Keep safety-critical risk and execution code auditable in the community edition.
+4. Document that ForecastFoundry does not guarantee returns, provide investment advice, custody user funds, or pool capital. Require jurisdiction-specific legal/compliance review before any custody, managed execution, or revenue-share product.
+5. Run `.\.venv\Scripts\python.exe -m pytest tests/test_repository_policy.py -q`, then `.\.venv\Scripts\python.exe -m ruff check .`; expect green and no secret material in policy files.
+6. Commit: `git add LICENSE NOTICE SECURITY.md CONTRIBUTING.md SUPPORT.md README.md docs/commercial.md tests/test_repository_policy.py && git commit -m "docs: define open-source and commercial boundaries"`.
 
 ## Handoff
 
