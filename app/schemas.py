@@ -119,3 +119,41 @@ class ProbabilityResult(FrozenModel):
     ensemble_spread: float
     uncertainty_score: float
     model_weights: dict[str, float]
+
+
+class OrderLevel(FrozenModel):
+    price: Decimal = Field(ge=0, le=1)
+    size: Decimal = Field(gt=0)
+
+
+class OrderBook(FrozenModel):
+    condition_id: str
+    asset_id: str
+    timestamp: str
+    bids: tuple[OrderLevel, ...]
+    asks: tuple[OrderLevel, ...]
+    best_bid: Decimal | None
+    best_ask: Decimal | None
+    spread: Decimal | None
+    midpoint: Decimal | None
+    available_depth: Decimal
+    minimum_order_size: Decimal
+    tick_size: Decimal
+    raw_data: dict[str, object]
+
+
+class ForecastMemberSeries(FrozenModel):
+    member_id: str
+    points: tuple[ForecastPoint, ...]
+
+
+class ForecastResult(FrozenModel):
+    provider: str
+    model: str
+    latitude: float
+    longitude: float
+    timezone: str
+    initialization_time: datetime | None
+    retrieved_at: datetime
+    members: tuple[ForecastMemberSeries, ...]
+    raw_metadata: dict[str, object]

@@ -1,0 +1,24 @@
+{
+  "latitude": 51.5,
+  "longitude": 0.0,
+  "generationtime_ms": 0.297,
+  "utc_offset_seconds": 3600,
+  "timezone": "Europe/London",
+  "timezone_abbreviation": "GMT+1",
+  "elevation": 4.0,
+  "hourly_units": {
+    "time": "iso8601",
+    "temperature_2m": "°C",
+    "temperature_2m_member01": "°C",
+    "temperature_2m_member02": "°C",
+    "temperature_2m_member03": "°C"
+  },
+  "hourly": {
+    "time": ["2026-08-02T00:00", "2026-08-02T06:00", "2026-08-02T12:00", "2026-08-02T18:00"],
+    "temperature_2m": [19.0, 21.0, 24.0, 22.0],
+    "temperature_2m_member01": [19.3, 21.2, 22.4, 21.0],
+    "temperature_2m_member02": [18.8, 21.5, 23.2, 21.5],
+    "temperature_2m_member03": [19.5, 22.0, 24.6, 22.2]
+  }
+}
+

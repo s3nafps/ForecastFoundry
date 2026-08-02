@@ -1,0 +1,64 @@
+{
+  "events": [
+    {
+      "id": "775541",
+      "title": "Highest temperature in London on August 2?",
+      "description": "This market will resolve to the temperature range that contains the highest temperature recorded at the London City Airport Station in degrees Celsius on 2 Aug '26. The resolution source is https://www.wunderground.com/history/daily/gb/london/EGLC. The resolution source measures temperatures to whole degrees Celsius.",
+      "resolutionSource": "https://www.wunderground.com/history/daily/gb/london/EGLC",
+      "active": true,
+      "closed": false,
+      "endDate": "2026-08-02T12:00:00Z",
+      "markets": [
+        {
+          "id": "3237362",
+          "question": "Will the highest temperature in London be 22°C or below on August 2?",
+          "description": "This market will resolve to the temperature range that contains the highest temperature recorded at the London City Airport Station in degrees Celsius on 2 Aug '26. The resolution source measures temperatures to whole degrees Celsius.",
+          "resolutionSource": "https://www.wunderground.com/history/daily/gb/london/EGLC",
+          "groupItemTitle": "22°C or below",
+          "conditionId": "condition-low",
+          "clobTokenIds": "[\"yes-low\", \"no-low\"]",
+          "outcomes": "[\"Yes\", \"No\"]",
+          "active": true,
+          "closed": false,
+          "endDate": "2026-08-02T12:00:00Z",
+          "liquidityNum": 37657.98407,
+          "orderMinSize": 5
+        },
+        {
+          "id": "3237363",
+          "question": "Will the highest temperature in London be 23°C on August 2?",
+          "description": "This market will resolve to the temperature range that contains the highest temperature recorded at the London City Airport Station in degrees Celsius on 2 Aug '26. The resolution source measures temperatures to whole degrees Celsius.",
+          "resolutionSource": "https://www.wunderground.com/history/daily/gb/london/EGLC",
+          "groupItemTitle": "23°C",
+          "conditionId": "condition-exact",
+          "clobTokenIds": "[\"yes-exact\", \"no-exact\"]",
+          "outcomes": "[\"Yes\", \"No\"]",
+          "active": true,
+          "closed": false,
+          "endDate": "2026-08-02T12:00:00Z",
+          "liquidityNum": 28662.95371,
+          "orderMinSize": 5
+        },
+        {
+          "id": "3237364",
+          "question": "Will the highest temperature in London be 24°C or higher on August 2?",
+          "description": "This market will resolve to the temperature range that contains the highest temperature recorded at the London City Airport Station in degrees Celsius on 2 Aug '26. The resolution source measures temperatures to whole degrees Celsius.",
+          "resolutionSource": "https://www.wunderground.com/history/daily/gb/london/EGLC",
+          "groupItemTitle": "24°C or higher",
+          "conditionId": "condition-high",
+          "clobTokenIds": "[\"yes-high\", \"no-high\"]",
+          "outcomes": "[\"Yes\", \"No\"]",
+          "active": true,
+          "closed": false,
+          "endDate": "2026-08-02T12:00:00Z",
+          "liquidityNum": 34801.62079,
+          "orderMinSize": 5
+        }
+      ]
+    }
+  ],
+  "tags": [],
+  "profiles": [],
+  "pagination": {"hasMore": false, "totalResults": 1}
+}
+
