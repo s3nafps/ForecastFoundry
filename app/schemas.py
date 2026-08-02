@@ -220,3 +220,19 @@ class EntryQuote(FrozenModel):
     cost: Decimal
     fees: Decimal
     total: Decimal
+
+
+class PaperAlert(FrozenModel):
+    question: str
+    outcome: str
+    model_probability: Decimal
+    executable_ask: Decimal
+    raw_edge: Decimal
+    usable_edge: Decimal
+    model_member_counts: dict[str, tuple[int, int]]
+    station_id: str
+    observation_summary: str
+    forecast_horizon_hours: int
+    spread: Decimal
+    rule_confidence: int
+    generated_at: datetime
