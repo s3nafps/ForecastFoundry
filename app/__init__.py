@@ -1,0 +1,1 @@
+"""WeatherEdge application package."""

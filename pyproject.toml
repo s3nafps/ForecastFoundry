@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "weatheredge"
+version = "0.1.0"
+description = "Paper-only Polymarket weather-market intelligence"
+requires-python = ">=3.12"
+dependencies = [
+  "aiosqlite>=0.20",
+  "alembic>=1.13",
+  "apscheduler>=3.10,<4",
+  "fastapi>=0.115",
+  "httpx>=0.27",
+  "jinja2>=3.1",
+  "pydantic-settings>=2.6",
+  "pyyaml>=6.0",
+  "sqlalchemy[asyncio]>=2.0",
+  "uvicorn[standard]>=0.32",
+  "websockets>=14",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.13",
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "ruff>=0.8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
