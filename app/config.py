@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     uncertainty_buffer: Decimal = Field(default=Decimal("0.04"), ge=0, le=1)
     rule_risk_buffer: Decimal = Field(default=Decimal("0.02"), ge=0, le=1)
     paper_starting_balance: Decimal = Field(default=Decimal("5.00"), gt=0)
+    forecast_models: str = "gfs_seamless,ecmwf_ifs025,icon_seamless,gem_global"
+    station_config_path: str = "config/stations.yaml"
+    market_overrides_path: str = "config/market_overrides.yaml"
 
     real_trading_enabled: bool = False
     polymarket_websocket_enabled: bool = False

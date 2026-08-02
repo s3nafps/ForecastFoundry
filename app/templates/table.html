@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ title }}</h1>
+{% if rows %}
+<table><thead><tr>{% for key in rows[0].keys() %}<th scope="col">{{ key|replace('_', ' ')|title }}</th>{% endfor %}</tr></thead>
+<tbody>{% for row in rows %}<tr>{% for value in row.values() %}<td>{{ value }}</td>{% endfor %}</tr>{% endfor %}</tbody></table>
+{% else %}<p>No records.</p>{% endif %}
+{% endblock %}

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} · WeatherEdge</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #07111f; color: #dbeafe; }
+    header, main { max-width: 1100px; margin: auto; padding: 1rem; }
+    nav { display: flex; gap: .8rem; flex-wrap: wrap; }
+    a { color: #67e8f9; } h1 { color: white; }
+    .mode { color: #fbbf24; font-weight: 700; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .8rem; }
+    .card, table, dl { background: #102033; border: 1px solid #1e3a5f; border-radius: .5rem; padding: 1rem; }
+    table { width: 100%; border-collapse: collapse; display: block; overflow-x: auto; }
+    th, td { padding: .6rem; text-align: left; border-bottom: 1px solid #1e3a5f; }
+    dt { color: #93c5fd; font-weight: 600; } dd { margin: 0 0 .8rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <header>
+    <nav aria-label="Primary">
+      <a href="/">WeatherEdge</a><span class="mode">PAPER ONLY</span>
+      <a href="/markets">Markets</a><a href="/signals">Signals</a>
+      <a href="/positions">Positions</a><a href="/performance">Performance</a>
+      <a href="/errors">Errors</a><a href="/config">Config</a>
+    </nav>
+  </header>
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>
