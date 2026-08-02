@@ -235,10 +235,7 @@ class RejectedSignal(Base):
 
 class PaperPosition(Base):
     __tablename__ = "paper_positions"
-    __table_args__ = (
-        Index("ix_paper_positions_status", "status"),
-        UniqueConstraint("market_id", "outcome_id", "status"),
-    )
+    __table_args__ = (Index("ix_paper_positions_status", "status"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"), unique=True)

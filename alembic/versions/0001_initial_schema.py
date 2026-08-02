@@ -309,7 +309,6 @@ def upgrade() -> None:
             ["signals.id"],
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("market_id", "outcome_id", "status"),
         sa.UniqueConstraint("signal_id"),
     )
     op.create_index(

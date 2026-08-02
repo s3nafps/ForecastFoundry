@@ -157,3 +157,66 @@ class ForecastResult(FrozenModel):
     retrieved_at: datetime
     members: tuple[ForecastMemberSeries, ...]
     raw_metadata: dict[str, object]
+
+
+class EdgeBuffers(FrozenModel):
+    estimated_fee: Decimal = Field(ge=0, le=1)
+    slippage: Decimal = Field(ge=0, le=1)
+    uncertainty: Decimal = Field(ge=0, le=1)
+    rule_risk: Decimal = Field(ge=0, le=1)
+
+
+class SignalPolicy(FrozenModel):
+    min_rule_confidence: int = Field(ge=0, le=100)
+    min_ensemble_members: int = Field(gt=0)
+    min_usable_edge: Decimal = Field(ge=0, le=1)
+    max_spread: Decimal = Field(ge=0, le=1)
+    min_liquidity: Decimal = Field(ge=0)
+
+
+class SignalCandidate(FrozenModel):
+    market_id: str
+    outcome_label: str
+    generated_at: datetime
+    market_active: bool
+    market_close_time: datetime | None
+    rules_complete: bool
+    rule_confidence: int
+    model_probability: Decimal
+    best_ask: Decimal | None
+    spread: Decimal | None
+    liquidity: Decimal
+    minimum_order_size: Decimal | None
+    paper_balance: Decimal
+    valid_members: int
+    observations_required: bool
+    observations_stale: bool
+    critical_quality_flags: tuple[str, ...]
+
+
+class EdgeResult(FrozenModel):
+    raw_edge: Decimal | None
+    usable_edge: Decimal | None
+
+
+class SignalDecision(FrozenModel):
+    accepted: bool
+    rejection_reasons: tuple[str, ...]
+    raw_edge: Decimal | None
+    usable_edge: Decimal | None
+
+
+class AlertState(FrozenModel):
+    outcome_label: str
+    executable_ask: Decimal
+    model_probability: Decimal
+    usable_edge: Decimal
+    sent_at: datetime
+
+
+class EntryQuote(FrozenModel):
+    entry_price: Decimal
+    shares: Decimal
+    cost: Decimal
+    fees: Decimal
+    total: Decimal
