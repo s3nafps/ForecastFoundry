@@ -1,0 +1,9 @@
+stations:
+  EGLC:
+    station_id: EGLC
+    name: London City Airport
+    latitude: 51.505
+    longitude: 0.055
+    timezone: Europe/London
+    source: https://aviationweather.gov/api/data/stationinfo?ids=EGLC&format=json
+
