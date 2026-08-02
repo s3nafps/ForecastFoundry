@@ -10,6 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[impo
 from fastapi import FastAPI, Request
 from sqlalchemy import select, text
 
+from app import PRODUCT_NAME
 from app.api import router as api_router
 from app.config import Settings
 from app.dashboard import router as dashboard_router
@@ -174,7 +175,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await raw_http.aclose()
             await engine.dispose()
 
-    application = FastAPI(title="WeatherEdge", version="0.1.0", lifespan=lifespan)
+    application = FastAPI(title=PRODUCT_NAME, version="0.1.0", lifespan=lifespan)
 
     @application.get("/health")
     async def health() -> dict[str, str]:

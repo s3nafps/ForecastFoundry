@@ -9,7 +9,7 @@ def format_signal_alert(alert: PaperAlert) -> str:
         f"{model}: {counts[0]}/{counts[1]} members"
         for model, counts in sorted(alert.model_member_counts.items())
     )
-    return f"""🌦 WEATHEREDGE PAPER SIGNAL
+    return f"""🌦 FORECASTFOUNDRY PAPER SIGNAL
 
 Market:
 {alert.question}

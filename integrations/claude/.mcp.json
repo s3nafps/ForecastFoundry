@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "forecastfoundry": {
+      "command": "forecastfoundry",
+      "args": ["mcp"],
+      "env": {
+        "EXECUTION_ENABLED": "false"
+      }
+    }
+  }
+}

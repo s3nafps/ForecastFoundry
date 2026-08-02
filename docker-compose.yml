@@ -1,4 +1,4 @@
-name: weatheredge
+name: forecastfoundry
 
 services:
   app:
@@ -27,3 +27,4 @@ services:
 
 volumes:
   weatheredge-data:
+    name: weatheredge_weatheredge-data

@@ -1,0 +1,25 @@
+{
+  "mcp": {
+    "servers": {
+      "forecastfoundry": {
+        "command": "forecastfoundry",
+        "args": ["mcp"],
+        "enabled": true,
+        "toolFilter": {
+          "include": [
+            "list_supported_domains",
+            "scan_markets",
+            "get_market_evidence",
+            "explain_prediction",
+            "run_backtest",
+            "provider_health",
+            "portfolio_status",
+            "reconcile_orders",
+            "pause_execution",
+            "resume_execution"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -3,6 +3,7 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
 
+from app import COMPATIBILITY_VERSION, PRODUCT_NAME
 from app.models import (
     ApplicationSetting,
     Event,
@@ -283,6 +284,8 @@ async def errors(request: Request) -> list[dict[str, object]]:
 async def config(request: Request) -> dict[str, object]:
     settings = request.app.state.settings
     return {
+        "product_name": PRODUCT_NAME,
+        "compatibility_version": COMPATIBILITY_VERSION,
         "mode": "PAPER_ONLY",
         "app_env": settings.app_env,
         "real_trading_enabled": settings.real_trading_enabled,

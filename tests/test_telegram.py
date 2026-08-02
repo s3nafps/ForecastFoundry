@@ -28,7 +28,7 @@ ALERT = PaperAlert(
 def test_formats_a_complete_paper_only_alert() -> None:
     message = format_signal_alert(ALERT)
 
-    assert "WEATHEREDGE PAPER SIGNAL" in message
+    assert "FORECASTFOUNDRY PAPER SIGNAL" in message
     assert "23°C" in message
     assert "Model probability: 68.0%" in message
     assert "Executable best ask: 46.0%" in message

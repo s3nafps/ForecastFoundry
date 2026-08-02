@@ -1,0 +1,6 @@
+[mcp_servers.forecastfoundry]
+command = "forecastfoundry"
+args = ["mcp"]
+
+[mcp_servers.forecastfoundry.env]
+EXECUTION_ENABLED = "false"
