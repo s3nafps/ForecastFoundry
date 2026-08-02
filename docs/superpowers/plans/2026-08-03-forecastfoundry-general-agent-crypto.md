@@ -28,13 +28,13 @@ The first implementation task is the ForecastFoundry rebrand and compatibility b
 
 ### 0. Rebrand and add agent-neutral interfaces
 
-Files: `pyproject.toml`, `app/main.py`, `app/__init__.py`, `app/api.py`, `app/dashboard.py`, `app/templates/base.html`, `.env.example`, `docker-compose.yml`, `Dockerfile`, new `app/cli.py`, new `app/mcp_server.py`, new `integrations/openclaw/openclaw.json`, new `integrations/codex/config.toml`, new `integrations/claude/.mcp.json`, new `docs/integrations.md`, `tests/test_branding.py`, `tests/test_cli_contract.py`.
+Files: `pyproject.toml`, `app/main.py`, `app/__init__.py`, `app/api.py`, `app/dashboard.py`, `app/templates/base.html`, `.env.example`, `docker-compose.yml`, `Dockerfile`, new `app/cli.py`, new `integrations/openclaw/openclaw.json`, new `integrations/codex/config.toml`, new `integrations/claude/.mcp.json`, new `docs/integrations.md`, `tests/test_branding.py`, `tests/test_cli_contract.py`.
 
 1. Add failing tests for the public product name, `forecastfoundry` distribution/CLI metadata, stable `app` imports, preserved database path, and paper-mode defaults; run `.\.venv\Scripts\python.exe -m pytest tests/test_branding.py tests/test_cli_contract.py -q` and observe red failures.
 2. Rename display strings, package metadata, executable name, Docker project/service labels, and documentation to ForecastFoundry. Keep historical storage/table identifiers and add a compatibility version field.
 3. Implement the CLI as a thin adapter over existing services with `scan`, `backtest`, `status`, `reconcile`, `pause`, and `mcp` commands; support stable JSON output and no live mode by default.
-4. Implement the restricted MCP server once, then add OpenClaw, Codex CLI, and Claude Code configuration examples that invoke the same stdio command. Do not add client-specific domain or execution logic.
-5. Run `.\.venv\Scripts\python.exe -m pytest tests/test_branding.py tests/test_cli_contract.py -q` and expect green; run `.\.venv\Scripts\python.exe -m ruff check app/cli.py app/mcp_server.py`.
+4. Add OpenClaw, Codex CLI, and Claude Code configuration examples that invoke `forecastfoundry mcp`; implement the MCP server and tool surface only in Task 10. Do not add client-specific domain or execution logic.
+5. Run `.\.venv\Scripts\python.exe -m pytest tests/test_branding.py tests/test_cli_contract.py -q` and expect green; run `.\.venv\Scripts\python.exe -m ruff check app/cli.py`.
 6. Commit: `git add pyproject.toml app app/templates .env.example docker-compose.yml Dockerfile integrations docs/integrations.md tests/test_branding.py tests/test_cli_contract.py && git commit -m "feat: rebrand as ForecastFoundry and add agent-neutral interfaces"`.
 
 ## Implementation tasks
