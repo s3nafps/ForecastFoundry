@@ -17,7 +17,7 @@ def test_supported_crypto_market_routes_to_crypto_plugin() -> None:
         MarketInput(
             market_id="crypto-1",
             title="Will BTC be above $70,000 at 2026-09-01 00:00 UTC?",
-            description="Coinbase BTC-USD close",
+            description="Coinbase BTC-USD closing price, rounded to nearest dollar.",
         )
     )
 
