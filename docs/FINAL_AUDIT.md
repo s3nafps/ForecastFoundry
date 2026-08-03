@@ -32,8 +32,7 @@ Scope: production-hardening milestone after the general-agent prototype.
 
 ## Verification
 
-The focused hardening tests, existing regression tests, Ruff, and mypy were
-run during implementation. The final gate to run before release is:
+The final gate completed on 2026-08-03:
 
 ```text
 .\.venv\Scripts\python.exe -m pytest -q
@@ -43,7 +42,10 @@ DATABASE_URL=sqlite+aiosqlite:///./data/ci.db alembic upgrade head
 git diff --check
 ```
 
-The CI workflow runs the same checks and a repository secret scan.
+Results: 102 tests passed, Ruff clean, mypy clean, SQLite migrations upgraded
+and downgraded successfully, and `git diff --check` clean. Docker smoke tests
+were not run because Docker is not installed in the build environment. The CI
+workflow runs the same checks and a repository secret scan.
 
 ## Explicitly disabled / not claimed
 
