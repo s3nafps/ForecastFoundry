@@ -1,10 +1,13 @@
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from alembic.config import Config
 
 from alembic import command
 from app.models import Base
+from app.services.contracts import contract_fingerprint
 
 NEW_TABLES = {
     "domain_contracts",
@@ -100,3 +103,89 @@ def test_idempotency_downgrade_preserves_control_and_audit_data(tmp_path: Path) 
     assert "execution_control_requests" not in tables
     assert state_rows == (1,)
     assert audit_rows == (1,)
+
+
+def test_contract_identity_migration_consolidates_duplicates_and_preserves_predictions(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "contract-identity.db"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path.as_posix()}")
+    command.upgrade(config, "0005")
+    created_at = datetime(2026, 8, 3, 10, tzinfo=UTC).isoformat()
+    with sqlite3.connect(database_path) as connection:
+        for fingerprint, accepted, reasons in (
+            ("legacy-accepted", 1, "[]"),
+            ("legacy-rejected", 0, '["unsupported_public_source"]'),
+        ):
+            connection.execute(
+                "INSERT INTO domain_contracts "
+                "(market_external_id, domain, accepted, resolution_source, expiry, contract_data, "
+                "rejection_reasons, provenance, fingerprint, created_at, updated_at) "
+                "VALUES (?, 'crypto', ?, 'chainlink', NULL, '{}', ?, '{}', ?, ?, ?)",
+                ("btc-duplicate", accepted, reasons, fingerprint, created_at, created_at),
+            )
+        contract_ids = [
+            row[0]
+            for row in connection.execute("SELECT id FROM domain_contracts ORDER BY id").fetchall()
+        ]
+        for index, contract_id in enumerate(contract_ids):
+            connection.execute(
+                "INSERT INTO prediction_runs "
+                "(contract_id, generated_at, model_name, model_version, input_hash, parameters, "
+                "probabilities, uncertainty, status) "
+                "VALUES (?, ?, 'fixture', 'v1', ?, '{}', '{}', NULL, 'paper_candidate')",
+                (contract_id, created_at, f"input-{index}"),
+            )
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT id, accepted, rejection_reasons, fingerprint FROM domain_contracts "
+            "WHERE market_external_id = 'btc-duplicate' AND domain = 'crypto'"
+        ).fetchall()
+        prediction_contract_ids = connection.execute(
+            "SELECT contract_id FROM prediction_runs ORDER BY id"
+        ).fetchall()
+    assert rows == [
+        (
+            max(contract_ids),
+            0,
+            '["unsupported_public_source"]',
+            contract_fingerprint(market_id="btc-duplicate", domain="crypto"),
+        )
+    ]
+    assert prediction_contract_ids == [(max(contract_ids),), (max(contract_ids),)]
+
+    with sqlite3.connect(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO domain_contracts "
+                "(market_external_id, domain, accepted, contract_data, rejection_reasons, "
+                "provenance, fingerprint, created_at, updated_at) "
+                "VALUES ('btc-duplicate', 'crypto', 0, '{}', '[]', '{}', "
+                "'different-fingerprint', ?, ?)",
+                (created_at, created_at),
+            )
+
+    command.downgrade(config, "0005")
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO domain_contracts "
+            "(market_external_id, domain, accepted, contract_data, rejection_reasons, provenance, "
+            "fingerprint, created_at, updated_at) "
+            "VALUES ('btc-duplicate', 'crypto', 0, '{}', '[]', '{}', "
+            "'post-downgrade-duplicate', ?, ?)",
+            (created_at, created_at),
+        )
+        count = connection.execute(
+            "SELECT COUNT(*) FROM domain_contracts "
+            "WHERE market_external_id = 'btc-duplicate' AND domain = 'crypto'"
+        ).fetchone()
+        prediction_contract_ids = connection.execute(
+            "SELECT contract_id FROM prediction_runs ORDER BY id"
+        ).fetchall()
+    assert count == (2,)
+    assert prediction_contract_ids == [(max(contract_ids),), (max(contract_ids),)]

@@ -334,7 +334,14 @@ class OperatorCredential(Base):
 
 class DomainContract(TimestampMixin, Base):
     __tablename__ = "domain_contracts"
-    __table_args__ = (Index("ix_domain_contracts_domain_expiry", "domain", "expiry"),)
+    __table_args__ = (
+        Index("ix_domain_contracts_domain_expiry", "domain", "expiry"),
+        UniqueConstraint(
+            "market_external_id",
+            "domain",
+            name="uq_domain_contracts_market_external_id_domain",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))
