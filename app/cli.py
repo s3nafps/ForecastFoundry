@@ -13,6 +13,7 @@ from app.database import make_engine, make_session_factory
 from app.domains.base import MarketInput
 from app.models import Base
 from app.services.application import ApplicationServiceError, ApplicationServices
+from app.services.execution_control import ExecutionControlConflict
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -118,9 +119,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return mcp_main()
     try:
         payload = asyncio.run(_execute(args))
-    except (ApplicationServiceError, PermissionError, ValueError, OSError) as exc:
-        error: dict[str, object] = {"status": "error", "error": str(exc)}
+    except ExecutionControlConflict as exc:
+        error: dict[str, object] = {
+            "status": "error",
+            "error": str(exc),
+            "error_type": exc.code,
+            "request_id": exc.request_id,
+        }
         _print(error, as_json=args.json)
+        return 2
+    except (ApplicationServiceError, PermissionError, ValueError, OSError) as exc:
+        validation_error: dict[str, object] = {"status": "error", "error": str(exc)}
+        _print(validation_error, as_json=args.json)
         return 2
     _print(payload, as_json=args.json)
     return 0

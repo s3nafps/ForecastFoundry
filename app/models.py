@@ -299,6 +299,24 @@ class ExecutionControlState(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
 
+class ExecutionControlRequest(Base):
+    """A request ID bound to one normalized control transition and its result."""
+
+    __tablename__ = "execution_control_requests"
+
+    request_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    target_paused: Mapped[bool] = mapped_column(Boolean)
+    actor: Mapped[str] = mapped_column(String(120))
+    operation: Mapped[str] = mapped_column(String(20))
+    reason: Mapped[str] = mapped_column(Text)
+    expected_revision: Mapped[int | None] = mapped_column(Integer)
+    result_paused: Mapped[bool] = mapped_column(Boolean)
+    result_revision: Mapped[int] = mapped_column(Integer)
+    result_actor: Mapped[str] = mapped_column(String(120))
+    result_reason: Mapped[str] = mapped_column(Text)
+    result_updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
 class OperatorCredential(Base):
     __tablename__ = "operator_credentials"
 

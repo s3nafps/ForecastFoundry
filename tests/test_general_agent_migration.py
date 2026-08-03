@@ -19,6 +19,7 @@ NEW_TABLES = {
     "reconciliation_events",
     "kill_switch_events",
     "keystore_metadata",
+    "execution_control_requests",
 }
 
 
@@ -44,3 +45,31 @@ def test_models_keep_live_orders_separate_from_paper_positions() -> None:
     assert "paper_positions" in Base.metadata.tables
     assert Base.metadata.tables["execution_orders"].c.mode.default.arg == "paper"
     assert "private_key" not in Base.metadata.tables["keystore_metadata"].columns
+
+
+def test_execution_control_request_ids_are_unique(tmp_path: Path) -> None:
+    database_path = tmp_path / "control-migration.db"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path.as_posix()}")
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "SELECT * FROM pragma_table_info('execution_control_requests')"
+            ).fetchall()
+        }
+        primary_key = connection.execute(
+            "SELECT pk FROM pragma_table_info('execution_control_requests') "
+            "WHERE name = 'request_id'"
+        ).fetchone()
+    assert primary_key == (1,)
+    assert {
+        "target_paused",
+        "actor",
+        "operation",
+        "reason",
+        "expected_revision",
+        "result_revision",
+    } <= columns

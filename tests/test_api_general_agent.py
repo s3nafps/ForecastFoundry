@@ -48,6 +48,20 @@ async def test_general_agent_api_is_redacted_and_operator_controls_are_authorize
 
             resumed = await client.post(
                 "/api/v1/operator/resume",
-                json={"token": "operator-secret", "reason": "operator test"},
+                json={
+                    "token": "operator-secret",
+                    "reason": "operator test",
+                    "request_id": "api-control-1",
+                },
             )
             assert resumed.json()["paused"] is False
+            conflict = await client.post(
+                "/api/v1/operator/pause",
+                json={
+                    "token": "operator-secret",
+                    "reason": "operator test",
+                    "request_id": "api-control-1",
+                },
+            )
+            assert conflict.status_code == 409
+            assert conflict.json()["detail"]["type"] == "idempotency_conflict"

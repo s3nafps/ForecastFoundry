@@ -25,6 +25,7 @@ from app.models import (
     Signal,
 )
 from app.services.application import ApplicationServices
+from app.services.execution_control import ExecutionControlConflict
 
 router = APIRouter(prefix="/api/v1")
 
@@ -429,6 +430,8 @@ async def _operator_action(
         raise HTTPException(status_code=401, detail="operator authentication failed") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ExecutionControlConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.as_dict()) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

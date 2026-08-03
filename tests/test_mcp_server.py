@@ -8,6 +8,7 @@ import pytest
 
 from app.mcp_policy import ALLOWED_TOOLS, FORBIDDEN_TOOL_NAMES, MCPPolicyError
 from app.mcp_server import create_server, invoke_tool
+from app.services.execution_control import IdempotencyConflict
 
 
 @pytest.mark.asyncio
@@ -37,6 +38,31 @@ def test_pause_resume_require_operator_authentication(monkeypatch: pytest.Monkey
 
     assert paused["paused"] is True
     assert resumed["paused"] is False
+
+
+def test_mcp_raises_typed_idempotency_conflict(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FORECASTFOUNDRY_OPERATOR_TOKEN", "operator-secret")
+    monkeypatch.setenv("FORECASTFOUNDRY_MCP_OPERATOR_TOKEN", "operator-secret")
+    monkeypatch.setenv(
+        "FORECASTFOUNDRY_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'mcp-control.db'}"
+    )
+    server = create_server()
+    asyncio.run(
+        invoke_tool(
+            server,
+            "resume_execution",
+            {"reason": "operator test", "request_id": "mcp-control-1"},
+        )
+    )
+    with pytest.raises(IdempotencyConflict) as raised:
+        asyncio.run(
+            invoke_tool(
+                server,
+                "pause_execution",
+                {"reason": "operator test", "request_id": "mcp-control-1"},
+            )
+        )
+    assert raised.value.as_dict()["type"] == "idempotency_conflict"
 
 
 def test_mcp_stdio_lists_tools_without_executor_secrets() -> None:

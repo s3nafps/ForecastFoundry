@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -7,12 +8,14 @@ from app.config import Settings
 from app.database import make_engine, make_session_factory
 from app.models import Base, KillSwitchEvent, OperatorCredential
 from app.services.application import ApplicationServices
-from app.services.execution_control import ExecutionControl
+from app.services.execution_control import ExecutionControl, IdempotencyConflict, RevisionConflict
 from app.services.operator_auth import verify_hash
 
 
 @pytest.mark.asyncio
-async def test_control_is_durable_idempotent_and_audited(tmp_path: Path) -> None:
+async def test_identical_retry_returns_original_result_without_another_audit(
+    tmp_path: Path,
+) -> None:
     engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'control.db'}")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -22,10 +25,18 @@ async def test_control_is_durable_idempotent_and_audited(tmp_path: Path) -> None
         first = await control.snapshot()
         assert first.paused is True
         changed = await control.set_paused(
-            False, actor="test", reason="resume paper loop", request_id="req-1"
+            False,
+            actor="test",
+            reason=" resume paper loop ",
+            request_id="req-1",
+            expected_revision=0,
         )
         again = await control.set_paused(
-            True, actor="ignored", reason="ignored", request_id="req-1"
+            False,
+            actor=" test ",
+            reason="resume paper loop",
+            request_id="req-1",
+            expected_revision=0,
         )
         await session.commit()
     async with sessions() as session:
@@ -36,6 +47,181 @@ async def test_control_is_durable_idempotent_and_audited(tmp_path: Path) -> None
     assert persisted == changed
     assert len(events) == 1
     assert events[0].request_id == "req-1"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {
+            "paused": True,
+            "actor": "test",
+            "reason": "resume paper loop",
+            "expected_revision": 0,
+        },
+        {
+            "paused": False,
+            "actor": "other",
+            "reason": "resume paper loop",
+            "expected_revision": 0,
+        },
+        {
+            "paused": False,
+            "actor": "test",
+            "reason": "different reason",
+            "expected_revision": 0,
+        },
+        {
+            "paused": False,
+            "actor": "test",
+            "reason": "resume paper loop",
+            "expected_revision": 1,
+        },
+    ],
+    ids=["opposite-target", "changed-actor", "changed-reason", "changed-expected-revision"],
+)
+async def test_request_id_rejects_changed_bound_fields(
+    tmp_path: Path, changed: dict[str, object]
+) -> None:
+    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'bound-fields.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = make_session_factory(engine)
+    async with sessions() as session:
+        control = ExecutionControl(session)
+        original = await control.set_paused(
+            False,
+            actor="test",
+            reason="resume paper loop",
+            request_id="bound-1",
+            expected_revision=0,
+        )
+        with pytest.raises(IdempotencyConflict):
+            await control.set_paused(
+                bool(changed["paused"]),
+                actor=str(changed["actor"]),
+                reason=str(changed["reason"]),
+                request_id="bound-1",
+                expected_revision=int(changed["expected_revision"]),
+            )
+        assert (await control.snapshot()) == original
+        assert len((await session.scalars(select(KillSwitchEvent))).all()) == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stale_expected_revision_leaves_state_unchanged(tmp_path: Path) -> None:
+    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'stale-revision.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = make_session_factory(engine)
+    async with sessions() as session:
+        await ExecutionControl(session).snapshot()
+        await session.commit()
+    async with sessions() as session:
+        control = ExecutionControl(session)
+        original = await control.set_paused(
+            False, actor="test", reason="resume", request_id="fresh", expected_revision=0
+        )
+        with pytest.raises(RevisionConflict, match="revision conflict"):
+            await control.set_paused(
+                True, actor="test", reason="pause", request_id="stale", expected_revision=0
+            )
+        assert (await control.snapshot()) == original
+        assert len((await session.scalars(select(KillSwitchEvent))).all()) == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_identical_requests_share_one_result(tmp_path: Path) -> None:
+    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'concurrent-retry.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = make_session_factory(engine)
+    async with sessions() as session:
+        await ExecutionControl(session).snapshot()
+        await session.commit()
+
+    async def transition() -> object:
+        async with sessions() as session:
+            result = await ExecutionControl(session).set_paused(
+                False,
+                actor="test",
+                reason="resume",
+                request_id="concurrent-retry",
+                expected_revision=0,
+            )
+            await session.commit()
+            return result
+
+    first, second = await asyncio.gather(transition(), transition())
+    assert first == second
+    async with sessions() as session:
+        assert len((await session.scalars(select(KillSwitchEvent))).all()) == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_allow_one_transition_per_revision(tmp_path: Path) -> None:
+    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'concurrent.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = make_session_factory(engine)
+    async with sessions() as session:
+        await ExecutionControl(session).snapshot()
+        await session.commit()
+
+    async def transition(request_id: str, paused: bool) -> object:
+        async with sessions() as session:
+            try:
+                result = await ExecutionControl(session).set_paused(
+                    paused,
+                    actor="test",
+                    reason=request_id,
+                    request_id=request_id,
+                    expected_revision=0,
+                )
+                await session.commit()
+                return result
+            except RuntimeError as exc:
+                await session.rollback()
+                return exc
+
+    results = await asyncio.gather(
+        transition("concurrent-pause", True), transition("concurrent-resume", False)
+    )
+    assert sum(type(result).__name__ == "RevisionConflict" for result in results) == 1
+    async with sessions() as session:
+        assert (await ExecutionControl(session).snapshot()).revision == 1
+        assert len((await session.scalars(select(KillSwitchEvent))).all()) == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retry_returns_original_result_across_fresh_sessions(tmp_path: Path) -> None:
+    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'persistent-idempotency.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = make_session_factory(engine)
+    async with sessions() as session:
+        first = await ExecutionControl(session).set_paused(
+            False, actor="test", reason="resume", request_id="persisted-1", expected_revision=0
+        )
+        await session.commit()
+    async with sessions() as session:
+        await ExecutionControl(session).set_paused(
+            True, actor="test", reason="pause", request_id="persisted-2", expected_revision=1
+        )
+        await session.commit()
+    async with sessions() as session:
+        retry = await ExecutionControl(session).set_paused(
+            False, actor="test", reason="resume", request_id="persisted-1", expected_revision=0
+        )
+        events = (await session.scalars(select(KillSwitchEvent))).all()
+    assert retry == first
+    assert retry.revision == 1
+    assert len(events) == 2
     await engine.dispose()
 
 
