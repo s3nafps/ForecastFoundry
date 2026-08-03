@@ -15,12 +15,19 @@ from app.api import router as api_router
 from app.config import Settings
 from app.dashboard import router as dashboard_router
 from app.database import make_engine, make_session_factory
+from app.domains.base import MarketInput
 from app.logging import configure_logging
-from app.models import ApplicationSetting, OrderBookSnapshot, Outcome, ProviderError
+from app.models import OrderBookSnapshot, Outcome, ProviderError
+from app.providers.registry import ProviderRegistry
 from app.schemas import OrderBook
+from app.services.application import ApplicationServices
+from app.services.crypto_data import CryptoMarketDataClient
+from app.services.crypto_pipeline import CryptoPaperPipeline
+from app.services.execution_control import ExecutionControl
 from app.services.forecast import OpenMeteoProvider
 from app.services.http import CircuitBreaker, ResilientHttpClient
 from app.services.polymarket import PolymarketClient
+from app.services.provider_health import ProviderHealthMonitor
 from app.services.rules import load_market_overrides, load_station_registry
 from app.services.telegram import TelegramClient
 from app.services.websocket import MarketWebSocket
@@ -70,11 +77,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         app.state.settings = resolved
         app.state.sessions = sessions
+        crypto_data = CryptoMarketDataClient(provider_http)
+        providers = (
+            ProviderHealthMonitor(sessions, ProviderRegistry.default(), provider_http)
+            if resolved.app_env != "test"
+            else None
+        )
+        app.state.services = ApplicationServices(
+            sessions,
+            resolved,
+            crypto_pipeline=CryptoPaperPipeline(sessions, crypto_data),
+            health_monitor=providers,
+        )
 
         async def scheduled_scan() -> str:
             async with sessions() as session:
-                paused = await session.get(ApplicationSetting, "paused")
-            if paused and paused.value is True:
+                control = await ExecutionControl(session).snapshot()
+            if control.paused:
                 return "paused"
             await scan_once(
                 settings=resolved,
@@ -86,6 +105,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 telegram=telegram,
                 now=datetime.now(UTC),
             )
+            return "completed"
+
+        async def scheduled_crypto_scan() -> str:
+            async with sessions() as session:
+                if (await ExecutionControl(session).snapshot()).paused:
+                    return "paused"
+            events = await polymarket.discover_crypto_events()
+            markets = tuple(
+                MarketInput(
+                    market_id=market.id,
+                    title=market.question,
+                    description=market.description,
+                    raw_data={"event": event.model_dump(mode="json")},
+                )
+                for event in events
+                for market in event.markets
+            )
+            await app.state.services.scan_markets(markets, now=datetime.now(UTC))
             return "completed"
 
         async def store_websocket_book(book: OrderBook) -> None:
@@ -148,6 +185,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await asyncio.sleep(5)
 
         app.state.run_scan = scheduled_scan
+        app.state.run_crypto_scan = scheduled_crypto_scan
 
         scheduler: AsyncIOScheduler | None = None
         websocket_task: asyncio.Task[None] | None = None
@@ -157,6 +195,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 scheduled_scan,
                 "interval",
                 seconds=min(resolved.polymarket_poll_seconds, resolved.weather_poll_seconds),
+                max_instances=1,
+                coalesce=True,
+            )
+            scheduler.add_job(
+                scheduled_crypto_scan,
+                "interval",
+                seconds=min(resolved.polymarket_poll_seconds, resolved.observation_poll_seconds),
                 max_instances=1,
                 coalesce=True,
             )

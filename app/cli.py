@@ -1,17 +1,113 @@
+"""Thin command-line adapter over :mod:`app.services.application`."""
+
 import argparse
+import asyncio
 import json
+import os
 from collections.abc import Sequence
+from typing import Any
 
 from app import PRODUCT_NAME
+from app.config import Settings
+from app.database import make_engine, make_session_factory
+from app.domains.base import MarketInput
+from app.models import Base
+from app.services.application import ApplicationServiceError, ApplicationServices
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="forecastfoundry", description=PRODUCT_NAME)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("scan", "backtest", "status", "reconcile", "pause", "mcp"):
-        command_parser = subparsers.add_parser(command)
-        command_parser.add_argument("--json", action="store_true")
+
+    scan = subparsers.add_parser("scan", help="normalize and persist one market contract")
+    scan.add_argument("--market-id")
+    scan.add_argument("--title")
+    scan.add_argument("--description", default="")
+    scan.add_argument("--json", action="store_true")
+
+    backtest = subparsers.add_parser("backtest", help="run a chronological paper backtest")
+    backtest.add_argument("--dataset")
+    backtest.add_argument("--json", action="store_true")
+
+    status = subparsers.add_parser("status", help="show persisted execution and paper status")
+    status.add_argument("--json", action="store_true")
+
+    reconcile = subparsers.add_parser("reconcile", help="reconcile persisted order state")
+    reconcile.add_argument("--json", action="store_true")
+
+    for name, help_text in (
+        ("pause", "pause all new entries"),
+        ("resume", "resume new entries after operator review"),
+    ):
+        control = subparsers.add_parser(name, help=help_text)
+        control.add_argument("--reason", default="")
+        control.add_argument("--request-id")
+        control.add_argument("--expected-revision", type=int)
+        control.add_argument("--json", action="store_true")
+
+    mcp = subparsers.add_parser("mcp", help="run the MCP stdio server")
+    mcp.add_argument("--json", action="store_true")
     return parser
+
+
+async def _services() -> tuple[ApplicationServices, Any]:
+    settings = Settings(
+        database_url=os.getenv(
+            "FORECASTFOUNDRY_DATABASE_URL", "sqlite+aiosqlite:///./data/weatheredge.db"
+        ),
+        app_env="cli",
+    )
+    engine = make_engine(settings.database_url)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    return ApplicationServices(make_session_factory(engine), settings), engine
+
+
+async def _execute(args: argparse.Namespace) -> dict[str, object]:
+    services, engine = await _services()
+    try:
+        if args.command == "scan":
+            if not args.market_id or not args.title:
+                raise ApplicationServiceError("--market-id and --title are required for scan")
+            return await services.scan_markets(
+                [
+                    MarketInput(
+                        market_id=args.market_id,
+                        title=args.title,
+                        description=args.description,
+                    )
+                ]
+            )
+        if args.command == "backtest":
+            if not args.dataset:
+                raise ApplicationServiceError("--dataset is required for backtest")
+            return await services.run_backtest(args.dataset)
+        if args.command == "status":
+            return await services.portfolio_status()
+        if args.command == "reconcile":
+            return await services.reconcile_orders()
+        if args.command in {"pause", "resume"}:
+            return await services.set_execution(
+                args.command == "pause",
+                token=os.getenv("FORECASTFOUNDRY_OPERATOR_TOKEN", ""),
+                reason=args.reason,
+                actor="cli_operator",
+                request_id=args.request_id,
+                expected_revision=args.expected_revision,
+            )
+        raise ApplicationServiceError(f"unsupported command: {args.command}")
+    finally:
+        await engine.dispose()
+
+
+def _print(payload: dict[str, object], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, sort_keys=True, default=str))
+        return
+    print(f"{PRODUCT_NAME}: {payload.get('status', payload.get('mode', 'ok'))}")
+    for key, value in payload.items():
+        if key not in {"status", "mode"}:
+            print(f"{key}: {value}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -20,11 +116,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         from app.mcp_server import main as mcp_main
 
         return mcp_main()
-    payload = {"product_name": PRODUCT_NAME, "command": args.command, "mode": "PAPER_ONLY"}
-    output = (
-        json.dumps(payload)
-        if args.json
-        else f"{PRODUCT_NAME}: {args.command} ({payload['mode']})"
-    )
-    print(output)
+    try:
+        payload = asyncio.run(_execute(args))
+    except (ApplicationServiceError, PermissionError, ValueError, OSError) as exc:
+        error: dict[str, object] = {"status": "error", "error": str(exc)}
+        _print(error, as_json=args.json)
+        return 2
+    _print(payload, as_json=args.json)
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

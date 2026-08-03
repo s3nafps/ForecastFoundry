@@ -285,6 +285,35 @@ class ApplicationSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
 
+class ExecutionControlState(Base):
+    """The single durable source of truth for new-entry control."""
+
+    __tablename__ = "execution_control_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    paused: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    request_id: Mapped[str] = mapped_column(String(80))
+    actor: Mapped[str] = mapped_column(String(120))
+    reason: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class OperatorCredential(Base):
+    __tablename__ = "operator_credentials"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    token_hash: Mapped[str] = mapped_column(String(256))
+    permissions: Mapped[list[str]] = mapped_column(JSON)
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    rotated_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    blocked_until: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
 class DomainContract(TimestampMixin, Base):
     __tablename__ = "domain_contracts"
     __table_args__ = (Index("ix_domain_contracts_domain_expiry", "domain", "expiry"),)
@@ -312,6 +341,20 @@ class ProviderRegistryEntry(TimestampMixin, Base):
     auth_mode: Mapped[str] = mapped_column(String(24))
     classification: Mapped[str] = mapped_column(String(24))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    metadata_json: Mapped[dict[str, object]] = mapped_column(JSON)
+
+
+class ProviderHealthSnapshot(Base):
+    __tablename__ = "provider_health_snapshots"
+    __table_args__ = (Index("ix_provider_health_name_checked", "provider", "checked_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(80), index=True)
+    checked_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    healthy: Mapped[bool] = mapped_column(Boolean)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32))
+    reason: Mapped[str] = mapped_column(String(160))
     metadata_json: Mapped[dict[str, object]] = mapped_column(JSON)
 
 
@@ -455,6 +498,8 @@ class KillSwitchEvent(Base):
     reason: Mapped[str] = mapped_column(Text)
     triggered_at: Mapped[datetime] = mapped_column(UTCDateTime())
     metadata_json: Mapped[dict[str, object]] = mapped_column(JSON)
+    request_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    revision: Mapped[int | None] = mapped_column(Integer)
 
 
 class KeystoreMetadata(Base):
