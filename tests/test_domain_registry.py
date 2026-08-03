@@ -25,6 +25,20 @@ def test_supported_crypto_market_routes_to_crypto_plugin() -> None:
     assert result.domain == "crypto"
 
 
+def test_unsupported_crypto_asset_is_rejected_at_crypto_boundary() -> None:
+    result = DomainRegistry().route(
+        MarketInput(
+            market_id="unsupported-crypto",
+            title="Will SOL be above $100 at 2026-09-01 00:00 UTC?",
+            description="Coinbase SOL-USD closing price, rounded to nearest dollar.",
+        )
+    )
+
+    assert result.accepted is False
+    assert result.domain == "crypto"
+    assert result.reasons == ("unsupported_asset",)
+
+
 def test_unknown_market_is_rejected_without_guessing() -> None:
     result = DomainRegistry().route(
         MarketInput(market_id="unknown-1", title="Will a new policy pass?", description="")

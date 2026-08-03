@@ -327,7 +327,13 @@ async def provider_health() -> dict[str, object]:
         "providers": [
             {
                 "name": spec.name,
-                "domain": "crypto" if spec.name in {"coinbase", "binance", "kraken"} else "weather",
+                "domain": (
+                    "crypto"
+                    if spec.name in {"coinbase", "binance", "kraken"}
+                    else "research"
+                    if spec.name in {"reddit", "x", "github"}
+                    else "weather"
+                ),
                 "auth": spec.auth,
                 "classification": spec.classification,
                 "freshness_seconds": spec.freshness_seconds,

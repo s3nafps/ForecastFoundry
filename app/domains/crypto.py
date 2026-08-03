@@ -52,7 +52,7 @@ class CryptoPlugin:
     def matches(self, market: MarketInput) -> bool:
         text = f"{market.title} {market.description}"
         return bool(
-            self._assets.search(text)
+            (self._assets.search(text) or self._unsupported_assets.search(text))
             and (self._comparisons.search(text) or self._sources.search(text))
         )
 

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 
 
 @dataclass(frozen=True)
@@ -27,7 +27,13 @@ def size_order(
     minimum_order_size: Decimal,
     limits: RiskLimits,
 ) -> RiskDecision:
-    if balance <= 0 or price <= 0 or requested_shares <= 0 or current_exposure < 0:
+    if (
+        balance <= 0
+        or price <= 0
+        or price > 1
+        or requested_shares <= 0
+        or current_exposure < 0
+    ):
         raise ValueError("risk inputs are invalid")
     if minimum_order_size <= 0:
         raise ValueError("minimum order size must be positive")
@@ -47,5 +53,5 @@ def size_order(
     shares = min(requested_shares, allowed_notional / price)
     if shares < minimum_order_size:
         return RiskDecision(False, Decimal("0"), Decimal("0"), ("risk_cap_below_minimum",))
-    shares = shares.quantize(Decimal("0.00000001"))
+    shares = shares.quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
     return RiskDecision(True, shares, shares * price)
