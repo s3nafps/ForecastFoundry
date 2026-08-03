@@ -228,9 +228,9 @@ async def test_application_and_crypto_pipeline_share_one_contract_fingerprint(
     pipeline = CryptoPaperPipeline(services.sessions, StaticCryptoData())  # type: ignore[arg-type]
 
     assert (await services.scan_markets([market]))["markets"][0]["accepted"] is True
-    assert (await pipeline.run(market, now=datetime(2026, 8, 3, 12, tzinfo=UTC)))["status"] == (
-        "paper_candidate"
-    )
+    pipeline_result = await pipeline.run(market, now=datetime(2026, 8, 3, 12, tzinfo=UTC))
+    assert pipeline_result["status"] == "rejected"
+    assert pipeline_result["reasons"] == ["market_metadata_missing"]
 
     async with services.sessions() as session:
         count = await session.scalar(select(func.count()).select_from(DomainContract))

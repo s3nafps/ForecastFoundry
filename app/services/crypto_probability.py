@@ -65,8 +65,8 @@ def estimate_crypto_probability(
 ) -> ProbabilityEstimate:
     values = tuple(returns)
     _validate_model_inputs(values, samples, horizon)
-    if comparison in {"above", "below"} and threshold is None:
-        raise ValueError("threshold is required for above/below")
+    if threshold is None:
+        raise ValueError("threshold or comparison baseline is required")
     if current_price <= 0:
         raise ValueError("current_price must be positive")
 
@@ -120,7 +120,9 @@ def _event_probability(
     comparison: Comparison,
     threshold: Decimal | None,
 ) -> Decimal:
-    target = threshold if threshold is not None else current_price
+    if threshold is None:
+        raise ValueError("threshold or comparison baseline is required")
+    target = threshold
     hits = 0
     paths = tuple(log_returns)
     for log_return in paths:

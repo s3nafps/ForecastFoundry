@@ -16,6 +16,8 @@ class CryptoContract(NormalizedMarket):
     source: str
     comparison: str
     threshold: Decimal | None = None
+    comparison_reference_price: Decimal | None = None
+    comparison_reference_time: datetime | None = None
     price_definition: str
     timezone: str = "UTC"
     rounding: str
@@ -106,6 +108,8 @@ def parse_crypto_market(market: MarketInput) -> CryptoMarketResult:
     comparison_match = re.search(r"\b(above|below|up|down)\b", lowered)
     comparison = comparison_match.group(1) if comparison_match else ""
     threshold: Decimal | None = None
+    comparison_reference_price: Decimal | None = None
+    comparison_reference_time: datetime | None = None
     if not comparison:
         reasons.append("comparison_missing")
     elif comparison in {"above", "below"}:
@@ -117,6 +121,10 @@ def parse_crypto_market(market: MarketInput) -> CryptoMarketResult:
                 threshold = Decimal(threshold_match.group(1).replace(",", ""))
             except InvalidOperation:
                 reasons.append("threshold_invalid")
+    else:
+        comparison_reference_price, comparison_reference_time = _parse_comparison_reference(text)
+        if comparison_reference_price is None or comparison_reference_time is None:
+            reasons.append("comparison_baseline_missing")
 
     expiry = _parse_expiry(text)
     if expiry is None:
@@ -149,6 +157,8 @@ def parse_crypto_market(market: MarketInput) -> CryptoMarketResult:
         source=source,
         comparison=comparison,
         threshold=threshold,
+        comparison_reference_price=comparison_reference_price,
+        comparison_reference_time=comparison_reference_time,
         price_definition=price_definition,
         rounding=rounding,
         original_rules={
@@ -172,6 +182,26 @@ def _parse_expiry(text: str) -> datetime | None:
         return datetime.fromisoformat(f"{match.group(1)}T{match.group(2)}+00:00").astimezone(UTC)
     except ValueError:
         return None
+
+
+def _parse_comparison_reference(text: str) -> tuple[Decimal | None, datetime | None]:
+    match = re.search(
+        r"\b(?:reference|baseline|starting)\s+price\s+(?:is\s+|of\s+)?"
+        r"\$?([0-9][0-9,]*(?:\.\d+)?)\s+(?:at|as of)\s+"
+        r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)\s*(?:UTC|Z)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None, None
+    try:
+        price = Decimal(match.group(1).replace(",", ""))
+        timestamp = datetime.fromisoformat(f"{match.group(2)}T{match.group(3)}+00:00").astimezone(
+            UTC
+        )
+    except (InvalidOperation, ValueError):
+        return None, None
+    return price, timestamp
 
 
 def _find_price_definition(text: str) -> str | None:

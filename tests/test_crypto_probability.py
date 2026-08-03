@@ -23,19 +23,21 @@ def candles(count: int = 5) -> list[dict[str, object]]:
     ]
 
 
-def test_normalizes_out_of_order_candles_and_returns_log_returns() -> None:
+def test_normalizes_descending_coinbase_candles_and_returns_log_returns() -> None:
     rows = candles()
-    series = normalize_candles("coinbase", [rows[2], rows[0], rows[1], rows[3], rows[4]], now=NOW)
+    series = normalize_candles("coinbase", tuple(reversed(rows)), now=NOW)
 
     assert [c.close for c in series.candles] == [
         Decimal("100"),
         Decimal("101"),
         Decimal("102"),
         Decimal("103"),
-        Decimal("104"),
     ]
-    assert len(series.log_returns) == 4
-    assert "out_of_order_sorted" in series.quality_flags
+    assert len(series.log_returns) == 3
+    assert series.quality_flags == (
+        "source_descending_reversed",
+        "incomplete_current_candle_removed",
+    )
 
 
 def test_rejects_duplicate_and_stale_candles() -> None:
@@ -44,7 +46,7 @@ def test_rejects_duplicate_and_stale_candles() -> None:
 
     stale = [{"timestamp": NOW - timedelta(days=2), "close": Decimal("100")}]
     with pytest.raises(CryptoDataQualityError, match="stale_data"):
-        normalize_candles("coinbase", stale, now=NOW, freshness=timedelta(hours=1))
+        normalize_candles("coinbase", stale, now=NOW, freshness=timedelta(hours=1), min_history=1)
 
 
 def test_rejects_insufficient_history() -> None:

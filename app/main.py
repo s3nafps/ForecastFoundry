@@ -90,7 +90,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.services = ApplicationServices(
             sessions,
             resolved,
-            crypto_pipeline=CryptoPaperPipeline(sessions, crypto_data),
+            crypto_pipeline=CryptoPaperPipeline(
+                sessions,
+                crypto_data,
+                pricing=polymarket,
+                settings=resolved,
+            ),
             health_monitor=providers,
         )
 
@@ -119,7 +124,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     market_id=market.id,
                     title=market.question,
                     description=market.description,
-                    raw_data={"event": event.model_dump(mode="json")},
+                    raw_data={
+                        "event": event.model_dump(mode="json"),
+                        "market": market.model_dump(mode="json"),
+                    },
                 )
                 for event in events
                 for market in event.markets

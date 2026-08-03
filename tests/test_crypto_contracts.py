@@ -25,14 +25,11 @@ def test_parses_canonical_btc_threshold_contract() -> None:
     assert result.contract.expiry.isoformat() == "2026-09-01T00:00:00+00:00"
 
 
-def test_parses_eth_up_down_contract() -> None:
+def test_rejects_up_down_contract_without_explicit_comparison_baseline() -> None:
     result = parse_crypto_market(load_fixture("eth_up_down.json"))
 
-    assert result.accepted is True
-    assert result.contract is not None
-    assert result.contract.asset == "ETH"
-    assert result.contract.comparison == "up"
-    assert result.contract.threshold is None
+    assert result.accepted is False
+    assert "comparison_baseline_missing" in result.reasons
 
 
 def test_rejects_missing_source_and_rounding() -> None:

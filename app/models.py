@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -205,11 +206,34 @@ class ProbabilityEstimate(Base):
 
 class Signal(Base):
     __tablename__ = "signals"
-    __table_args__ = (Index("ix_signals_market_generated", "market_id", "generated_at"),)
+    __table_args__ = (
+        Index("ix_signals_market_generated", "market_id", "generated_at"),
+        CheckConstraint(
+            "model_probability >= 0 AND model_probability <= 1",
+            name="ck_signals_model_probability",
+        ),
+        CheckConstraint(
+            "executable_ask >= 0 AND executable_ask <= 1",
+            name="ck_signals_executable_ask",
+        ),
+        CheckConstraint("side IS NULL OR side = 'buy'", name="ck_signals_side"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    market_id: Mapped[int] = mapped_column(ForeignKey("markets.id", ondelete="CASCADE"))
-    outcome_id: Mapped[int] = mapped_column(ForeignKey("outcomes.id", ondelete="CASCADE"))
+    market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="CASCADE"))
+    outcome_id: Mapped[int | None] = mapped_column(ForeignKey("outcomes.id", ondelete="CASCADE"))
+    contract_id: Mapped[int | None] = mapped_column(
+        ForeignKey("domain_contracts.id", ondelete="CASCADE"), index=True
+    )
+    prediction_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prediction_runs.id", ondelete="CASCADE"), index=True
+    )
+    evidence_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evidence_snapshots.id", ondelete="RESTRICT"), index=True
+    )
+    side: Mapped[str | None] = mapped_column(String(8))
+    outcome_label: Mapped[str | None] = mapped_column(String(16))
+    token_id: Mapped[str | None] = mapped_column(String(100))
     generated_at: Mapped[datetime] = mapped_column(UTCDateTime())
     model_probability: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     executable_ask: Mapped[Decimal] = mapped_column(Numeric(18, 8))
@@ -217,6 +241,7 @@ class Signal(Base):
     usable_edge: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     buffers: Mapped[dict[str, str]] = mapped_column(JSON)
     fingerprint: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    freshness_seconds: Mapped[int | None] = mapped_column(Integer)
     alerted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     alert_error: Mapped[str | None] = mapped_column(Text)
     signal_data: Mapped[dict[str, object]] = mapped_column(JSON)
@@ -224,10 +249,40 @@ class Signal(Base):
 
 class RejectedSignal(Base):
     __tablename__ = "rejected_signals"
-    __table_args__ = (Index("ix_rejections_market_generated", "market_id", "generated_at"),)
+    __table_args__ = (
+        Index("ix_rejections_market_generated", "market_id", "generated_at"),
+        CheckConstraint(
+            "model_probability IS NULL OR (model_probability >= 0 AND model_probability <= 1)",
+            name="ck_rejected_signals_model_probability",
+        ),
+        CheckConstraint(
+            "executable_ask IS NULL OR (executable_ask >= 0 AND executable_ask <= 1)",
+            name="ck_rejected_signals_executable_ask",
+        ),
+        CheckConstraint("side IS NULL OR side = 'buy'", name="ck_rejected_signals_side"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))
+    contract_id: Mapped[int | None] = mapped_column(
+        ForeignKey("domain_contracts.id", ondelete="CASCADE"), index=True
+    )
+    prediction_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prediction_runs.id", ondelete="CASCADE"), index=True
+    )
+    evidence_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evidence_snapshots.id", ondelete="RESTRICT"), index=True
+    )
+    fingerprint: Mapped[str | None] = mapped_column(String(128), unique=True, index=True)
+    side: Mapped[str | None] = mapped_column(String(8))
+    outcome_label: Mapped[str | None] = mapped_column(String(16))
+    token_id: Mapped[str | None] = mapped_column(String(100))
+    model_probability: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
+    executable_ask: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
+    raw_edge: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
+    usable_edge: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
+    buffers: Mapped[dict[str, str] | None] = mapped_column(JSON)
+    freshness_seconds: Mapped[int | None] = mapped_column(Integer)
     generated_at: Mapped[datetime] = mapped_column(UTCDateTime())
     reasons: Mapped[list[str]] = mapped_column(JSON)
     candidate_data: Mapped[dict[str, object]] = mapped_column(JSON)
@@ -389,6 +444,10 @@ class EvidenceSnapshot(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))
+    contract_id: Mapped[int | None] = mapped_column(
+        ForeignKey("domain_contracts.id", ondelete="CASCADE"), index=True
+    )
+    fingerprint: Mapped[str | None] = mapped_column(String(128), unique=True, index=True)
     provider: Mapped[str] = mapped_column(String(80))
     provider_version: Mapped[str | None] = mapped_column(String(80))
     source_timestamp: Mapped[datetime | None] = mapped_column(UTCDateTime())
@@ -408,6 +467,9 @@ class PredictionRun(Base):
     market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))
     contract_id: Mapped[int | None] = mapped_column(
         ForeignKey("domain_contracts.id", ondelete="SET NULL")
+    )
+    evidence_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evidence_snapshots.id", ondelete="SET NULL"), index=True
     )
     generated_at: Mapped[datetime] = mapped_column(UTCDateTime())
     model_name: Mapped[str] = mapped_column(String(120))
