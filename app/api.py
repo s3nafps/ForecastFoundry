@@ -4,12 +4,13 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
+
 from app import COMPATIBILITY_VERSION, PRODUCT_NAME
 from app.models import (
     ApplicationSetting,
+    Event,
     EvidenceSnapshot,
     ExecutionOrder,
-    Event,
     ForecastMember,
     ForecastRun,
     KillSwitchEvent,
