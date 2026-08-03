@@ -127,6 +127,19 @@ class PolymarketClient:
         )
         return parse_gamma_search(payload)
 
+    async def discover_crypto_events(self) -> tuple[GammaEvent, ...]:
+        payload = await self._http.request_json(
+            "GET",
+            f"{self._gamma_url}/public-search",
+            params={
+                "q": "Bitcoin Ethereum BTC ETH",
+                "events_status": "active",
+                "limit_per_type": 100,
+                "search_profiles": "false",
+            },
+        )
+        return parse_gamma_search(payload)
+
     async def get_order_books(self, token_ids: Sequence[str]) -> tuple[OrderBook, ...]:
         payload = await self._http.request_json(
             "POST",

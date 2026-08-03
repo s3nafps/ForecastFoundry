@@ -9,6 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
+from app.domains.base import MarketInput
+from app.domains.registry import DomainRegistry
 from app.models import (
     Event,
     ForecastMember,
@@ -210,6 +212,15 @@ async def scan_once(
         return
 
     for source_event in events:
+        domain_route = DomainRegistry().route(
+            MarketInput(
+                market_id=source_event.id,
+                title=source_event.title,
+                description=source_event.description,
+            )
+        )
+        if domain_route.domain != "weather":
+            continue
         async with sessions() as session:
             event = await _upsert_event(session, source_event)
             markets: dict[str, tuple[Market, Outcome, GammaMarket]] = {}
