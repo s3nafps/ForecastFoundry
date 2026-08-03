@@ -127,7 +127,7 @@ async def test_recorded_london_market_runs_end_to_end_without_duplicate_alerts(
             polymarket=StaticPolymarket(event, books),
             forecast_providers=(StaticForecast(forecast),),
             stations=stations,
-            overrides={},
+            overrides={"775541": {"rounding_method": "half_up"}},
             telegram=telegram,
             now=retrieved_at,
         )
@@ -161,4 +161,39 @@ async def test_recorded_london_market_runs_end_to_end_without_duplicate_alerts(
     assert counts["paper_positions"] == 1
     assert counts["rejected_signals"] == 5
     assert len(telegram.alerts) == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_incomplete_domain_contract_before_forecast(
+    tmp_path: Path,
+) -> None:
+    gamma_payload = json.loads((FIXTURES / "london_event.json").read_text(encoding="utf-8"))
+    event = parse_gamma_search(gamma_payload)[0].model_copy(update={"end_date": None})
+    database_url = f"sqlite+aiosqlite:///{(tmp_path / 'worker-strict.db').as_posix()}"
+    settings = Settings(database_url=database_url)
+    engine = make_engine(database_url)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = make_session_factory(engine)
+
+    await scan_once(
+        settings=settings,
+        sessions=sessions,
+        polymarket=StaticPolymarket(event, ()),
+        forecast_providers=(),
+        stations=load_station_registry(Path("config/stations.yaml")),
+        overrides={"775541": {"rounding_method": "half_up"}},
+        telegram=None,
+        now=datetime(2026, 8, 2, 9, tzinfo=UTC),
+    )
+
+    async with sessions() as session:
+        rejections = (await session.scalars(select(RejectedSignal))).all()
+        forecast_count = await session.scalar(select(func.count()).select_from(ForecastRun))
+    assert len(rejections) == 3
+    assert all(
+        rejection.reasons == ["weather_contract_invalid:expiry_missing"] for rejection in rejections
+    )
+    assert forecast_count == 0
     await engine.dispose()

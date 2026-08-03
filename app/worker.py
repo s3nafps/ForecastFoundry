@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.domains.base import MarketInput
 from app.domains.registry import DomainRegistry
+from app.domains.weather import WeatherPlugin
 from app.models import (
     Event,
     ForecastMember,
@@ -211,12 +212,14 @@ async def scan_once(
             await session.commit()
         return
 
+    registry = DomainRegistry(plugins=(WeatherPlugin(stations=stations, overrides=overrides),))
     for source_event in events:
-        domain_route = DomainRegistry().route(
+        domain_route = registry.route(
             MarketInput(
                 market_id=source_event.id,
                 title=source_event.title,
                 description=source_event.description,
+                raw_data={"event": source_event.model_dump(mode="json")},
             )
         )
         if domain_route.domain != "weather":
@@ -227,6 +230,18 @@ async def scan_once(
             for source_market in source_event.markets:
                 market, yes = await _upsert_market(session, event, source_market)
                 markets[source_market.id] = (market, yes, source_market)
+            if not domain_route.accepted:
+                for market, _, _ in markets.values():
+                    session.add(
+                        RejectedSignal(
+                            market_id=market.id,
+                            generated_at=now,
+                            reasons=list(domain_route.reasons),
+                            candidate_data={"event_id": source_event.id},
+                        )
+                    )
+                await session.commit()
+                continue
             try:
                 normalized = normalize_temperature_event(
                     source_event, stations, overrides.get(source_event.id)

@@ -35,13 +35,17 @@ class WeatherPlugin:
         self,
         *,
         stations: Mapping[str, Station] | None = None,
+        overrides: Mapping[str, Mapping[str, object]] | None = None,
         allow_legacy_unresolved: bool = False,
     ) -> None:
         self._stations = dict(stations or _load_default_stations())
+        self._overrides = dict(overrides or {})
         self._allow_legacy_unresolved = allow_legacy_unresolved
 
     def matches(self, market: MarketInput) -> bool:
         text = f"{market.title} {market.description}".lower()
+        if "rainfall" in text or "precipitation" in text:
+            return False
         return any(term in text for term in ("temperature", "°c", "°f", "â°c", "â°f"))
 
     def normalize(self, market: MarketInput) -> DomainRoute:
@@ -61,7 +65,10 @@ class WeatherPlugin:
             )
         try:
             event = _event_from_market(market)
-            normalized = normalize_temperature_event(event, self._stations)
+            expiry = _expiry_for_market(market.market_id, event)
+            normalized = normalize_temperature_event(
+                event, self._stations, self._overrides.get(event.id)
+            )
         except (RuleNormalizationError, ValueError, TypeError) as exc:
             return DomainRoute(
                 accepted=False,
@@ -77,7 +84,7 @@ class WeatherPlugin:
         return DomainRoute(
             accepted=True,
             domain=self.name,
-            contract=_contract_from_normalized(market.market_id, normalized, event.end_date),
+            contract=_contract_from_normalized(market.market_id, normalized, expiry),
         )
 
 
@@ -92,6 +99,19 @@ def _event_from_market(market: MarketInput) -> GammaEvent:
     if not isinstance(event_payload, dict):
         raise RuleNormalizationError("event payload is missing")
     return GammaEvent.model_validate(event_payload)
+
+
+def _expiry_for_market(market_id: str, event: GammaEvent) -> datetime:
+    if market_id == event.id:
+        expiry = event.end_date
+    else:
+        source_market = next((item for item in event.markets if item.id == market_id), None)
+        if source_market is None:
+            raise RuleNormalizationError("market id not in supplied event")
+        expiry = source_market.end_date
+    if expiry is None:
+        raise RuleNormalizationError("expiry missing")
+    return expiry
 
 
 def _contract_from_normalized(
