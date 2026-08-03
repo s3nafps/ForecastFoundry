@@ -118,47 +118,40 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # 0007 cannot represent crypto paper rows because its positions require legacy
-    # weather market/outcome foreign keys. Remove only those unrepresentable lifecycle
-    # rows before restoring NOT NULL; signals/evidence/predictions remain intact.
+    # Refuse before the first DDL statement when 0007 cannot represent populated
+    # lifecycle state. A downgrade must never silently turn financial history into
+    # data loss; operators can back up and perform an explicit forward recovery.
     connection = op.get_bind()
-    connection.execute(
-        sa.text(
-            "DELETE FROM calibration_metrics WHERE settlement_id IN "
-            "(SELECT ps.id FROM paper_settlements ps JOIN paper_positions pp "
-            "ON pp.id = ps.position_id WHERE pp.market_id IS NULL OR pp.outcome_id IS NULL)"
+    incompatible_checks = {
+        "unrepresentable positions": (
+            "SELECT COUNT(*) FROM paper_positions "
+            "WHERE market_id IS NULL OR outcome_id IS NULL"
+        ),
+        "execution decisions": "SELECT COUNT(*) FROM paper_execution_decisions",
+        "lifecycle orders": (
+            "SELECT COUNT(*) FROM execution_orders "
+            "WHERE signal_id IS NOT NULL OR intent_fingerprint IS NOT NULL"
+        ),
+        "authoritative settlements": (
+            "SELECT COUNT(*) FROM paper_settlements WHERE evidence_snapshot_id IS NOT NULL "
+            "OR outcome_label IS NOT NULL OR request_id IS NOT NULL OR actor IS NOT NULL "
+            "OR request_fingerprint IS NOT NULL"
+        ),
+        "settlement calibration": (
+            "SELECT COUNT(*) FROM calibration_metrics WHERE settlement_id IS NOT NULL"
+        ),
+    }
+    populated = [
+        name
+        for name, query in incompatible_checks.items()
+        if int(connection.execute(sa.text(query)).scalar_one()) > 0
+    ]
+    if populated:
+        raise RuntimeError(
+            "0008 downgrade refused before schema changes: populated new lifecycle data "
+            f"cannot be represented by 0007 ({', '.join(populated)}). "
+            "Back up the database and use forward recovery."
         )
-    )
-    connection.execute(
-        sa.text(
-            "DELETE FROM paper_settlements WHERE position_id IN "
-            "(SELECT id FROM paper_positions WHERE market_id IS NULL OR outcome_id IS NULL)"
-        )
-    )
-    connection.execute(
-        sa.text(
-            "DELETE FROM execution_fills WHERE execution_order_id IN "
-            "(SELECT execution_order_id FROM paper_positions "
-            "WHERE market_id IS NULL OR outcome_id IS NULL)"
-        )
-    )
-    connection.execute(
-        sa.text(
-            "DELETE FROM paper_execution_decisions WHERE signal_id IN "
-            "(SELECT signal_id FROM paper_positions "
-            "WHERE market_id IS NULL OR outcome_id IS NULL)"
-        )
-    )
-    connection.execute(
-        sa.text("DELETE FROM paper_positions WHERE market_id IS NULL OR outcome_id IS NULL")
-    )
-    connection.execute(
-        sa.text(
-            "DELETE FROM execution_orders WHERE id IN "
-            "(SELECT eo.id FROM execution_orders eo JOIN signals s ON s.id = eo.signal_id "
-            "WHERE eo.mode = 'paper' AND (s.market_id IS NULL OR s.outcome_id IS NULL))"
-        )
-    )
     op.drop_table("paper_execution_decisions")
     with op.batch_alter_table("calibration_metrics") as batch_op:
         batch_op.drop_constraint("uq_calibration_metrics_settlement_id", type_="unique")

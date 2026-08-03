@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -31,12 +32,19 @@ from app.models import (
     Signal,
 )
 from app.services.application import ApplicationServices
+from app.services.crypto_data import (
+    _endpoint,
+    canonical_payload_hash,
+    normalize_crypto_settlement_payload,
+)
 from app.services.paper import (
     PaperLifecycle,
     SettlementEvidence,
     SettlementWorker,
     get_paper_balance,
 )
+
+ENTRY_NOW = datetime(2026, 8, 3, 23, tzinfo=UTC)
 
 
 async def _seed(tmp_path: Path, *, balance: Decimal = Decimal("100")):
@@ -134,6 +142,45 @@ async def _seed(tmp_path: Path, *, balance: Decimal = Decimal("100")):
     return engine, sessions, signal.id, contract.id, expiry
 
 
+def _crypto_evidence(
+    contract_id: int,
+    expiry: datetime,
+    price: str,
+    *,
+    claimed: str | None = None,
+    source: str = "coinbase",
+    retrieved_at: datetime | None = None,
+) -> SettlementEvidence:
+    url, query = _endpoint("coinbase", "BTC", "USD", "1h", 200)
+    payload = {
+        "request": {"url": url, "query": query},
+        "response": [
+            [
+                int((expiry - timedelta(hours=1)).timestamp()),
+                price,
+                price,
+                price,
+                price,
+                "1",
+            ]
+        ],
+    }
+    normalized = normalize_crypto_settlement_payload(
+        "coinbase", payload, asset="BTC", quote="USD", expiry=expiry
+    )
+    return SettlementEvidence(
+        contract_id=contract_id,
+        source=source,
+        observed_at=expiry,
+        retrieved_at=retrieved_at or expiry,
+        outcome_label=claimed,
+        raw_response_hash=canonical_payload_hash(payload),
+        raw_payload=payload,
+        normalized_values=normalized,
+        provider_version="fixture-v1",
+    )
+
+
 @pytest.mark.asyncio
 async def test_signal_executes_and_settles_once_with_calibration(tmp_path: Path) -> None:
     engine, sessions, signal_id, contract_id, expiry = await _seed(tmp_path)
@@ -148,26 +195,17 @@ async def test_signal_executes_and_settles_once_with_calibration(tmp_path: Path)
         ),
     )
 
-    first = await lifecycle.execute_signal(signal_id)
-    retry = await lifecycle.execute_signal(signal_id)
+    first = await lifecycle.execute_signal(signal_id, now=ENTRY_NOW)
+    retry = await lifecycle.execute_signal(signal_id, now=ENTRY_NOW)
     assert first == retry
     assert first["status"] == "filled"
 
-    evidence = SettlementEvidence(
-        contract_id=contract_id,
-        source="coinbase",
-        observed_at=expiry,
+    evidence = _crypto_evidence(
+        contract_id,
+        expiry,
+        "99.49",
+        claimed="NO",
         retrieved_at=expiry + timedelta(minutes=1),
-        outcome_label="NO",
-        raw_response_hash="settlement-raw",
-        normalized_values={
-            "asset": "BTC",
-            "quote": "USD",
-            "price": "99.49",
-            "price_definition": "closing price",
-        },
-        provider_version="v1",
-        license_metadata={},
     )
     settled = await lifecycle.settle_position(first["position_id"], evidence)
     database_url = str(engine.url)
@@ -207,8 +245,8 @@ async def test_risk_denial_is_persisted_without_financial_mutation(tmp_path: Pat
     settings = Settings(
         app_env="test", scheduler_enabled=False, paper_starting_balance=Decimal("5")
     )
-    result = await PaperLifecycle(sessions, settings).execute_signal(signal_id)
-    retry = await PaperLifecycle(sessions, settings).execute_signal(signal_id)
+    result = await PaperLifecycle(sessions, settings).execute_signal(signal_id, now=ENTRY_NOW)
+    retry = await PaperLifecycle(sessions, settings).execute_signal(signal_id, now=ENTRY_NOW)
     assert result == retry
     assert result["status"] == "rejected"
     assert result["reasons"] == ["risk_cap_below_minimum"]
@@ -225,16 +263,8 @@ async def test_settlement_rejects_wrong_authoritative_source(tmp_path: Path) -> 
         app_env="test", scheduler_enabled=False, paper_starting_balance=Decimal("100")
     )
     lifecycle = PaperLifecycle(sessions, settings)
-    execution = await lifecycle.execute_signal(signal_id)
-    evidence = SettlementEvidence(
-        contract_id=contract_id,
-        source="binance",
-        observed_at=expiry,
-        retrieved_at=expiry,
-        outcome_label="YES",
-        raw_response_hash="wrong",
-        normalized_values={},
-    )
+    execution = await lifecycle.execute_signal(signal_id, now=ENTRY_NOW)
+    evidence = _crypto_evidence(contract_id, expiry, "101", claimed="YES", source="binance")
     with pytest.raises(ValueError, match="source"):
         await lifecycle.settle_position(execution["position_id"], evidence)
     async with sessions() as session:
@@ -249,25 +279,12 @@ async def test_settlement_worker_is_due_only_and_isolates_failures(tmp_path: Pat
         app_env="test", scheduler_enabled=False, paper_starting_balance=Decimal("100")
     )
     lifecycle = PaperLifecycle(sessions, settings)
-    execution = await lifecycle.execute_signal(signal_id)
+    execution = await lifecycle.execute_signal(signal_id, now=ENTRY_NOW)
     fetched: list[int] = []
 
     async def fetch(position_id: int) -> SettlementEvidence:
         fetched.append(position_id)
-        return SettlementEvidence(
-            contract_id=contract_id,
-            source="coinbase",
-            observed_at=expiry,
-            retrieved_at=expiry,
-            outcome_label="NO",
-            raw_response_hash="worker-resolution",
-            normalized_values={
-                "asset": "BTC",
-                "quote": "USD",
-                "price": "99",
-                "price_definition": "closing price",
-            },
-        )
+        return _crypto_evidence(contract_id, expiry, "99", claimed="NO")
 
     assert await SettlementWorker(lifecycle).run_due(fetch, now=expiry - timedelta(seconds=1)) == []
     result = await SettlementWorker(lifecycle).run_due(fetch, now=expiry)
@@ -291,23 +308,10 @@ async def test_no_position_calibrates_against_the_purchased_outcome(tmp_path: Pa
         app_env="test", scheduler_enabled=False, paper_starting_balance=Decimal("100")
     )
     lifecycle = PaperLifecycle(sessions, settings)
-    execution = await lifecycle.execute_signal(signal_id)
+    execution = await lifecycle.execute_signal(signal_id, now=ENTRY_NOW)
     await lifecycle.settle_position(
         execution["position_id"],
-        SettlementEvidence(
-            contract_id=contract_id,
-            source="coinbase",
-            observed_at=expiry,
-            retrieved_at=expiry,
-            outcome_label="NO",
-            raw_response_hash="no-resolution",
-            normalized_values={
-                "asset": "BTC",
-                "quote": "USD",
-                "price": "99",
-                "price_definition": "closing price",
-            },
-        ),
+        _crypto_evidence(contract_id, expiry, "99", claimed="NO"),
     )
     async with sessions() as session:
         metric = await session.scalar(select(CalibrationMetric))
@@ -355,7 +359,8 @@ async def test_concurrent_distinct_entries_reserve_exact_balance(tmp_path: Path)
     )
     lifecycle = PaperLifecycle(sessions, settings)
     results = await asyncio.gather(
-        lifecycle.execute_signal(first_id), lifecycle.execute_signal(second_id)
+        lifecycle.execute_signal(first_id, now=ENTRY_NOW),
+        lifecycle.execute_signal(second_id, now=ENTRY_NOW),
     )
     assert {result["status"] for result in results} == {"filled"}
     async with sessions() as session:
@@ -379,22 +384,10 @@ async def test_concurrent_shared_evidence_settles_two_positions_once(tmp_path: P
     )
     lifecycle = PaperLifecycle(sessions, settings)
     entries = await asyncio.gather(
-        lifecycle.execute_signal(first_id), lifecycle.execute_signal(second_id)
+        lifecycle.execute_signal(first_id, now=ENTRY_NOW),
+        lifecycle.execute_signal(second_id, now=ENTRY_NOW),
     )
-    evidence = SettlementEvidence(
-        contract_id=contract_id,
-        source="coinbase",
-        observed_at=expiry,
-        retrieved_at=expiry,
-        outcome_label="YES",
-        raw_response_hash="shared-settlement",
-        normalized_values={
-            "asset": "BTC",
-            "quote": "USD",
-            "price": "100.50",
-            "price_definition": "closing price",
-        },
-    )
+    evidence = _crypto_evidence(contract_id, expiry, "100.50", claimed="YES")
     settled = await asyncio.gather(
         *(lifecycle.settle_position(int(entry["position_id"]), evidence) for entry in entries)
     )
@@ -418,7 +411,7 @@ async def test_paused_and_stale_signals_are_typed_denials_without_orders(tmp_pat
         sessions,
         Settings(app_env="test", scheduler_enabled=False, paper_starting_balance=Decimal("100")),
     )
-    paused = await lifecycle.execute_signal(signal_id, now=datetime(2026, 8, 3, 12, tzinfo=UTC))
+    paused = await lifecycle.execute_signal(signal_id, now=ENTRY_NOW)
     assert paused["reasons"] == ["execution_paused"]
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(ExecutionOrder)) == 0
@@ -433,9 +426,9 @@ async def test_changed_execution_arguments_conflict(tmp_path: Path) -> None:
         sessions,
         Settings(app_env="test", scheduler_enabled=False, paper_starting_balance=Decimal("100")),
     )
-    await lifecycle.execute_signal(signal_id, requested_shares=Decimal("5"))
+    await lifecycle.execute_signal(signal_id, requested_shares=Decimal("5"), now=ENTRY_NOW)
     with pytest.raises(RuntimeError, match="idempotency"):
-        await lifecycle.execute_signal(signal_id, requested_shares=Decimal("6"))
+        await lifecycle.execute_signal(signal_id, requested_shares=Decimal("6"), now=ENTRY_NOW)
     await engine.dispose()
 
 
@@ -449,16 +442,24 @@ async def test_changed_execution_arguments_conflict(tmp_path: Path) -> None:
         ("closed", "market_closed"),
         ("inactive", "market_inactive"),
         ("stale", "signal_stale"),
+        ("signal_future", "signal_from_future"),
+        ("prediction_future", "prediction_from_future"),
+        ("evidence_retrieval_future", "evidence_retrieved_from_future"),
+        ("evidence_source_future", "evidence_source_from_future"),
     ),
 )
 async def test_entry_eligibility_fails_closed(tmp_path: Path, case: str, reason: str) -> None:
     engine, sessions, signal_id, _, expiry = await _seed(tmp_path)
-    now = datetime(2026, 8, 3, 12, tzinfo=UTC)
+    now = ENTRY_NOW
     async with sessions() as session:
         signal = await session.get(Signal, signal_id)
         assert signal is not None
         contract = await session.get(DomainContract, signal.contract_id)
         assert contract is not None
+        prediction = await session.get(PredictionRun, signal.prediction_run_id)
+        assert prediction is not None
+        evidence = await session.get(EvidenceSnapshot, signal.evidence_snapshot_id)
+        assert evidence is not None
         if case == "contract_missing":
             signal.contract_id = None
         elif case == "contract_rejected":
@@ -477,6 +478,14 @@ async def test_entry_eligibility_fails_closed(tmp_path: Path, case: str, reason:
             }
         elif case == "stale":
             now = expiry - timedelta(minutes=10)
+        elif case == "signal_future":
+            signal.generated_at = now + timedelta(seconds=1)
+        elif case == "prediction_future":
+            prediction.generated_at = now + timedelta(seconds=1)
+        elif case == "evidence_retrieval_future":
+            evidence.retrieved_at = now + timedelta(seconds=1)
+        elif case == "evidence_source_future":
+            evidence.source_timestamp = now + timedelta(seconds=1)
         await session.commit()
     result = await PaperLifecycle(
         sessions,
@@ -512,37 +521,11 @@ async def test_crypto_settlement_derives_equality_and_rejects_changed_replay(
         sessions,
         Settings(app_env="test", scheduler_enabled=False, paper_starting_balance=Decimal("100")),
     )
-    entry = await lifecycle.execute_signal(signal_id)
-    evidence = SettlementEvidence(
-        contract_id=contract_id,
-        source="coinbase",
-        observed_at=expiry,
-        retrieved_at=expiry,
-        outcome_label=None,
-        raw_response_hash="equality",
-        normalized_values={
-            "asset": "BTC",
-            "quote": "USD",
-            "price": "100",
-            "price_definition": "closing price",
-        },
-    )
+    entry = await lifecycle.execute_signal(signal_id, now=ENTRY_NOW)
+    evidence = _crypto_evidence(contract_id, expiry, "100")
     result = await lifecycle.settle_position(int(entry["position_id"]), evidence)
     assert result["outcome"] == "NO"
-    changed = SettlementEvidence(
-        contract_id=contract_id,
-        source="coinbase",
-        observed_at=expiry,
-        retrieved_at=expiry,
-        outcome_label="YES",
-        raw_response_hash="changed",
-        normalized_values={
-            "asset": "BTC",
-            "quote": "USD",
-            "price": "101",
-            "price_definition": "closing price",
-        },
-    )
+    changed = _crypto_evidence(contract_id, expiry, "101", claimed="YES")
     with pytest.raises(RuntimeError, match="idempotency"):
         await lifecycle.settle_position(int(entry["position_id"]), changed)
     await engine.dispose()
@@ -553,10 +536,12 @@ async def test_crypto_settlement_derives_equality_and_rejects_changed_replay(
     ("change", "message"),
     (
         ({"source": "binance"}, "source"),
-        ({"asset": "ETH"}, "asset or quote"),
-        ({"quote": "EUR"}, "asset or quote"),
+        ({"asset": "ETH"}, "asset"),
+        ({"quote": "EUR"}, "quote"),
         ({"observed_delta": 1}, "timestamp"),
         ({"claimed": "YES", "price": "99"}, "claimed outcome"),
+        ({"raw_payload": None}, "raw payload is required"),
+        ({"raw_hash": "not-a-sha256"}, "raw payload hash is invalid"),
         ({"raw_payload": {"price": "99"}}, "raw payload hash"),
     ),
 )
@@ -568,23 +553,27 @@ async def test_crypto_settlement_rejects_forged_or_mismatched_evidence(
         sessions,
         Settings(app_env="test", scheduler_enabled=False, paper_starting_balance=Decimal("100")),
     )
-    entry = await lifecycle.execute_signal(signal_id)
-    values = {
-        "asset": str(change.get("asset", "BTC")),
-        "quote": str(change.get("quote", "USD")),
-        "price": str(change.get("price", "101")),
-        "price_definition": "closing price",
-    }
-    evidence = SettlementEvidence(
-        contract_id=contract_id,
-        source=str(change.get("source", "coinbase")),
-        observed_at=expiry + timedelta(seconds=int(change.get("observed_delta", 0))),
-        retrieved_at=expiry + timedelta(seconds=int(change.get("observed_delta", 0))),
-        outcome_label=str(change["claimed"]) if "claimed" in change else None,
-        raw_response_hash="not-the-canonical-hash",
-        normalized_values=values,
-        raw_payload=change.get("raw_payload"),
-    )
+    entry = await lifecycle.execute_signal(signal_id, now=ENTRY_NOW)
+    evidence = _crypto_evidence(contract_id, expiry, str(change.get("price", "101")))
+    if "source" in change:
+        evidence = replace(evidence, source=str(change["source"]))
+    if "asset" in change or "quote" in change:
+        evidence = replace(
+            evidence,
+            normalized_values={
+                **evidence.normalized_values,
+                **{key: str(change[key]) for key in ("asset", "quote") if key in change},
+            },
+        )
+    if "observed_delta" in change:
+        changed_time = expiry + timedelta(seconds=int(change["observed_delta"]))
+        evidence = replace(evidence, observed_at=changed_time, retrieved_at=changed_time)
+    if "claimed" in change:
+        evidence = replace(evidence, outcome_label=str(change["claimed"]))
+    if "raw_payload" in change:
+        evidence = replace(evidence, raw_payload=change["raw_payload"])
+    if "raw_hash" in change:
+        evidence = replace(evidence, raw_response_hash=str(change["raw_hash"]))
     with pytest.raises(ValueError, match=message):
         await lifecycle.settle_position(int(entry["position_id"]), evidence)
     async with sessions() as session:
@@ -610,8 +599,12 @@ def test_paper_lifecycle_migration_round_trip_preserves_existing_data(tmp_path: 
             "SELECT value FROM application_settings WHERE key = 'paper_balance'"
         ).fetchone() == ('"17.50"',)
     asyncio.run(_populate_migrated_crypto_lifecycle(database_path))
-    command.downgrade(config, "0007")
+    with pytest.raises(RuntimeError, match="0008 downgrade refused before schema changes"):
+        command.downgrade(config, "0007")
     with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "0008",
+        )
         assert (
             connection.execute(
                 "SELECT value FROM application_settings WHERE key = 'paper_balance'"
@@ -619,7 +612,32 @@ def test_paper_lifecycle_migration_round_trip_preserves_existing_data(tmp_path: 
             is not None
         )
         assert connection.execute("SELECT COUNT(*) FROM signals").fetchone() == (1,)
-        assert connection.execute("SELECT COUNT(*) FROM paper_positions").fetchone() == (0,)
+        for table in (
+            "execution_orders",
+            "execution_fills",
+            "paper_positions",
+            "paper_settlements",
+            "calibration_metrics",
+        ):
+            assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (1,)
+        position_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(paper_positions)")
+        }
+        assert "execution_order_id" in position_columns
+
+
+def test_paper_lifecycle_migration_empty_downgrade_round_trip(tmp_path: Path) -> None:
+    database_path = tmp_path / "paper-empty-migration.db"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path.as_posix()}")
+    command.upgrade(config, "head")
+    command.downgrade(config, "0007")
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "0007",
+        )
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(paper_positions)")}
+        assert "execution_order_id" not in columns
     command.upgrade(config, "head")
 
 
@@ -722,20 +740,7 @@ async def _populate_migrated_crypto_lifecycle(database_path: Path) -> None:
     entry = await lifecycle.execute_signal(signal.id, now=expiry - timedelta(hours=1))
     await lifecycle.settle_position(
         int(entry["position_id"]),
-        SettlementEvidence(
-            contract_id=contract.id,
-            source="coinbase",
-            observed_at=expiry,
-            retrieved_at=expiry,
-            outcome_label=None,
-            raw_response_hash="migration-settlement",
-            normalized_values={
-                "asset": "BTC",
-                "quote": "USD",
-                "price": "101",
-                "price_definition": "closing price",
-            },
-        ),
+        _crypto_evidence(contract.id, expiry, "101"),
     )
     await engine.dispose()
 
@@ -752,7 +757,7 @@ async def test_cli_rest_and_mcp_share_authoritative_portfolio(
         database_url=database_url,
         paper_starting_balance=Decimal("100"),
     )
-    await PaperLifecycle(sessions, settings).execute_signal(signal_id)
+    await PaperLifecycle(sessions, settings).execute_signal(signal_id, now=ENTRY_NOW)
     async with sessions() as session:
         live_order = ExecutionOrder(
             mode="live",

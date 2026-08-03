@@ -4,6 +4,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from typing import cast
 
 from app.services.http import ResilientHttpClient
 
@@ -28,6 +29,7 @@ class CryptoSeries:
     retrieved_at: datetime
     provider_version: str
     raw_response_hash: str
+    raw_payload: object
     request_url: str
     request_params: dict[str, object]
     quality_flags: tuple[str, ...] = ()
@@ -234,9 +236,10 @@ def normalize_candles(
         interval_seconds=interval_seconds,
         retrieved_at=current,
         provider_version=provider_version or f"{source}-normalized-v1",
-        raw_response_hash=_hash_payload(
+        raw_response_hash=canonical_payload_hash(
             raw_response if raw_response is not None else normalized_payload
         ),
+        raw_payload=raw_response if raw_response is not None else normalized_payload,
         request_url=request_url,
         request_params=dict(request_params or {}),
         quality_flags=tuple(flags),
@@ -287,7 +290,7 @@ def _kraken_response_pair(asset: str, quote: str) -> str:
         raise ValueError("unsupported_pair") from exc
 
 
-def _hash_payload(payload: object) -> str:
+def canonical_payload_hash(payload: object) -> str:
     encoded = json.dumps(
         payload,
         sort_keys=True,
@@ -295,3 +298,55 @@ def _hash_payload(payload: object) -> str:
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def normalize_crypto_settlement_payload(
+    source: str,
+    payload: object,
+    *,
+    asset: str,
+    quote: str,
+    expiry: datetime,
+    interval_seconds: int = 3600,
+) -> dict[str, str]:
+    """Derive an exact closing price from a canonical provider request/response envelope."""
+    if not isinstance(payload, dict):
+        raise CryptoDataQualityError("settlement_payload_invalid")
+    request = payload.get("request")
+    response = payload.get("response")
+    if not isinstance(request, dict):
+        raise CryptoDataQualityError("settlement_request_provenance_missing")
+    expected_url, expected_query = _endpoint(source, asset, quote, "1h", 200)
+    if request.get("url") != expected_url or request.get("query") != expected_query:
+        raise CryptoDataQualityError("settlement_request_pair_mismatch")
+    rows = _rows(
+        source,
+        response,
+        expected_pair=_kraken_response_pair(asset, quote) if source == "kraken" else None,
+    )
+    boundary = expiry.astimezone(UTC)
+    matches: list[dict[str, object]] = []
+    for row in rows:
+        timestamp = row.get("timestamp")
+        if isinstance(timestamp, datetime) and timestamp.astimezone(UTC) + timedelta(
+            seconds=interval_seconds
+        ) == boundary:
+            matches.append(row)
+    if len(matches) != 1:
+        raise CryptoDataQualityError("settlement_candle_boundary_missing")
+    price = Decimal(str(matches[0]["close"]))
+    if not price.is_finite() or price <= 0:
+        raise CryptoDataQualityError("settlement_price_invalid")
+    candle_timestamp = cast(datetime, matches[0]["timestamp"])
+    derived_boundary = candle_timestamp.astimezone(UTC) + timedelta(seconds=interval_seconds)
+    return {
+        "asset": asset.upper(),
+        "quote": quote.upper(),
+        "price": str(price),
+        "price_definition": "closing price",
+        "source_timestamp": derived_boundary.isoformat(),
+    }
+
+
+# Historical private name kept for compatibility with older callers/tests.
+_hash_payload = canonical_payload_hash

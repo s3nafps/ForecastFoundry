@@ -496,6 +496,7 @@ class CryptoPaperPipeline:
                 await session.rollback()
         paper = await PaperLifecycle(self.sessions, self.settings).execute_signal(
             signal_id,
+            now=captured_at,
             actor="system:crypto_pipeline",
             request_id=f"crypto-paper:{fingerprint}",
         )

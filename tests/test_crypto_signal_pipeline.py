@@ -36,7 +36,9 @@ from app.services.crypto_data import (
     CryptoSeries,
     _endpoint,
     _rows,
+    canonical_payload_hash,
     normalize_candles,
+    normalize_crypto_settlement_payload,
 )
 from app.services.crypto_pipeline import CryptoPaperPipeline
 from app.services.paper import PaperLifecycle, SettlementEvidence
@@ -301,6 +303,20 @@ async def test_btc_fixture_runs_through_settlement_and_calibration(tmp_path: Pat
     async with pipeline.sessions() as session:
         contract = await session.scalar(select(DomainContract))
     assert contract is not None
+    url, query = _endpoint("coinbase", "BTC", "USD", "1h", 200)
+    payload = {
+        "request": {"url": url, "query": query},
+        "response": [
+            [
+                int((expiry - timedelta(hours=1)).timestamp()),
+                "101",
+                "101",
+                "101",
+                "101",
+                "1",
+            ]
+        ],
+    }
     settlement = await PaperLifecycle(pipeline.sessions, pipeline.settings).settle_position(
         int(result["paper"]["position_id"]),
         SettlementEvidence(
@@ -309,13 +325,11 @@ async def test_btc_fixture_runs_through_settlement_and_calibration(tmp_path: Pat
             observed_at=expiry,
             retrieved_at=expiry + timedelta(minutes=1),
             outcome_label="YES",
-            raw_response_hash="btc-resolution-fixture",
-            normalized_values={
-                "asset": "BTC",
-                "quote": "USD",
-                "price": "101",
-                "price_definition": "closing price",
-            },
+            raw_response_hash=canonical_payload_hash(payload),
+            raw_payload=payload,
+            normalized_values=normalize_crypto_settlement_payload(
+                "coinbase", payload, asset="BTC", quote="USD", expiry=expiry
+            ),
             provider_version="coinbase-fixture-v1",
         ),
     )

@@ -33,6 +33,7 @@ from app.services.paper import SettlementFetcher
 from app.services.polymarket import PolymarketClient
 from app.services.provider_health import ProviderHealthMonitor
 from app.services.rules import load_market_overrides, load_station_registry
+from app.services.settlement import ProductionSettlementFetcher
 from app.services.telegram import TelegramClient
 from app.services.websocket import MarketWebSocket
 from app.worker import scan_once
@@ -87,6 +88,9 @@ def create_app(
         app.state.sessions = sessions
         app.state.metrics = Metrics()
         crypto_data = CryptoMarketDataClient(provider_http)
+        active_settlement_fetcher = settlement_fetcher or ProductionSettlementFetcher(
+            sessions, crypto_data
+        )
         providers = (
             ProviderHealthMonitor(sessions, ProviderRegistry.default(), provider_http)
             if resolved.app_env != "test"
@@ -142,7 +146,9 @@ def create_app(
 
         async def scheduled_settlement() -> dict[str, object]:
             services = cast(ApplicationServices, app.state.services)
-            return await services.run_settlement_job(settlement_fetcher, now=datetime.now(UTC))
+            return await services.run_settlement_job(
+                active_settlement_fetcher, now=datetime.now(UTC)
+            )
 
         async def store_websocket_book(book: OrderBook) -> None:
             async with sessions() as session:

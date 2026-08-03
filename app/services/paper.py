@@ -2,10 +2,13 @@
 
 import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from typing import cast
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
@@ -26,8 +29,14 @@ from app.models import (
     PredictionRun,
     Signal,
 )
-from app.schemas import EntryQuote
+from app.schemas import Bucket, EntryQuote, RoundingMethod
+from app.services.crypto_data import (
+    CryptoDataQualityError,
+    canonical_payload_hash,
+    normalize_crypto_settlement_payload,
+)
 from app.services.execution_control import ExecutionControl
+from app.services.probability import round_temperature
 from app.services.risk import RiskLimits, size_order
 
 
@@ -250,12 +259,15 @@ class PaperLifecycle:
         captured_at = now or datetime.now(UTC)
         if captured_at.tzinfo is None:
             raise PaperTradingError("now_must_be_timezone_aware")
+        captured_at = captured_at.astimezone(UTC)
         actor = actor.strip()
         if not actor:
             raise PaperTradingError("paper actor is required")
         async with self.sessions() as session:
             await _begin_money_write(session)
-            signal = await session.get(Signal, signal_id)
+            signal = await session.scalar(
+                select(Signal).where(Signal.id == signal_id).with_for_update()
+            )
             if signal is None:
                 raise PaperTradingError("signal not found")
             required = minimum_order_size or _required_size(signal)
@@ -265,8 +277,8 @@ class PaperLifecycle:
                 {
                     "operation": "execute_paper_signal",
                     "signal": signal.fingerprint,
-                    "requested_shares": str(requested),
-                    "minimum_order_size": str(required),
+                    "requested_shares": _decimal_key(requested),
+                    "minimum_order_size": _decimal_key(required),
                     "actor": actor,
                 }
             )
@@ -308,7 +320,25 @@ class PaperLifecycle:
                     daily_pnl=Decimal("0"),
                     created_at=captured_at,
                 )
-                session.add(record)
+                try:
+                    async with session.begin_nested():
+                        session.add(record)
+                        await session.flush()
+                except IntegrityError:
+                    persisted = await _existing_execution_decision(
+                        session, signal_id, normalized_request_id
+                    )
+                    if persisted is None:
+                        raise
+                    _assert_request_matches(
+                        persisted.request_id,
+                        persisted.actor,
+                        persisted.request_fingerprint,
+                        normalized_request_id,
+                        actor,
+                        request_fingerprint,
+                    )
+                    return await self._execution_result(session, persisted)
                 await session.commit()
                 return await self._execution_result(session, record)
 
@@ -370,15 +400,13 @@ class PaperLifecycle:
                 daily_pnl=daily_pnl,
                 created_at=captured_at,
             )
-            session.add(record)
             try:
-                await session.flush()
+                async with session.begin_nested():
+                    session.add(record)
+                    await session.flush()
             except IntegrityError:
-                await session.rollback()
-                persisted = await session.scalar(
-                    select(PaperExecutionDecision).where(
-                        PaperExecutionDecision.signal_id == signal_id
-                    )
+                persisted = await _existing_execution_decision(
+                    session, signal_id, normalized_request_id
                 )
                 if persisted is None:
                     raise
@@ -497,10 +525,20 @@ class PaperLifecycle:
         else:
             reasons.append("market_snapshot_missing")
 
-        signal_age = max(0, int((now - signal.generated_at).total_seconds()))
-        signal_freshness = signal.freshness_seconds or 0
-        if signal_freshness + signal_age > self.settings.polymarket_poll_seconds * 2:
-            reasons.append("signal_stale")
+        if signal.generated_at > now:
+            reasons.append("signal_from_future")
+        else:
+            signal_age = int((now - signal.generated_at).total_seconds())
+            signal_freshness = signal.freshness_seconds or 0
+            if signal_freshness + signal_age > self.settings.polymarket_poll_seconds * 2:
+                reasons.append("signal_stale")
+        prediction = (
+            await session.get(PredictionRun, signal.prediction_run_id)
+            if signal.prediction_run_id is not None
+            else None
+        )
+        if prediction is not None and prediction.generated_at > now:
+            reasons.append("prediction_from_future")
         evidence = (
             await session.get(EvidenceSnapshot, signal.evidence_snapshot_id)
             if signal.evidence_snapshot_id is not None
@@ -509,12 +547,19 @@ class PaperLifecycle:
         if evidence is None and (contract is None or contract.domain != "weather"):
             reasons.append("evidence_missing")
         elif evidence is not None:
-            raw_limit = evidence.normalized_values.get("freshness_limit_seconds", 7200)
-            limit = int(raw_limit) if isinstance(raw_limit, (int, str)) else 7200
-            source_age = evidence.freshness_seconds or 0
-            retrieval_age = max(0, int((now - evidence.retrieved_at).total_seconds()))
-            if source_age + retrieval_age > limit:
-                reasons.append("evidence_stale")
+            if evidence.retrieved_at > now:
+                reasons.append("evidence_retrieved_from_future")
+            if evidence.source_timestamp is not None and evidence.source_timestamp > now:
+                reasons.append("evidence_source_from_future")
+            if evidence.retrieved_at <= now and (
+                evidence.source_timestamp is None or evidence.source_timestamp <= now
+            ):
+                raw_limit = evidence.normalized_values.get("freshness_limit_seconds", 7200)
+                limit = int(raw_limit) if isinstance(raw_limit, (int, str)) else 7200
+                source_age = evidence.freshness_seconds or 0
+                retrieval_age = int((now - evidence.retrieved_at).total_seconds())
+                if source_age + retrieval_age > limit:
+                    reasons.append("evidence_stale")
         return tuple(dict.fromkeys(reasons))
 
     async def _execution_result(
@@ -548,7 +593,9 @@ class PaperLifecycle:
         if mark < 0 or mark > 1:
             raise PaperTradingError("paper mark must be between zero and one")
         async with self.sessions() as session:
-            position = await session.get(PaperPosition, position_id)
+            position = await session.scalar(
+                select(PaperPosition).where(PaperPosition.id == position_id).with_for_update()
+            )
             if position is None or position.status != "open":
                 raise PaperTradingError("paper position is not open")
             position.current_mark = mark
@@ -574,7 +621,9 @@ class PaperLifecycle:
             raise PaperTradingError("settlement actor is required")
         async with self.sessions() as session:
             await _begin_money_write(session)
-            position = await session.get(PaperPosition, position_id)
+            position = await session.scalar(
+                select(PaperPosition).where(PaperPosition.id == position_id).with_for_update()
+            )
             if position is None:
                 raise PaperTradingError("paper position is not open")
             existing = await session.scalar(
@@ -588,11 +637,14 @@ class PaperLifecycle:
                     "actor": actor,
                     "contract_id": evidence.contract_id,
                     "source": evidence.source.strip().lower(),
-                    "observed_at": evidence.observed_at.isoformat(),
-                    "retrieved_at": evidence.retrieved_at.isoformat(),
-                    "raw_response_hash": evidence.raw_response_hash,
-                    "normalized_values": evidence.normalized_values,
-                    "claimed_outcome": evidence.outcome_label,
+                    "observed_at": _utc_key(evidence.observed_at),
+                    "retrieved_at": _utc_key(evidence.retrieved_at),
+                    "raw_response_hash": evidence.raw_response_hash.lower(),
+                    "claimed_outcome": (
+                        evidence.outcome_label.strip().upper()
+                        if evidence.outcome_label is not None
+                        else None
+                    ),
                 }
             )
             if existing is not None:
@@ -629,10 +681,9 @@ class PaperLifecycle:
                 {
                     "kind": "settlement-evidence-v1",
                     "contract": contract.fingerprint,
-                    "source": evidence.source,
-                    "observed_at": evidence.observed_at.isoformat(),
-                    "raw": evidence.raw_response_hash,
-                    "normalized_values": evidence.normalized_values,
+                    "source": evidence.source.strip().lower(),
+                    "observed_at": _utc_key(evidence.observed_at),
+                    "raw": evidence.raw_response_hash.lower(),
                 }
             )
             snapshot = await session.scalar(
@@ -658,8 +709,18 @@ class PaperLifecycle:
                     ),
                     license_metadata=evidence.license_metadata,
                 )
-                session.add(snapshot)
-                await session.flush()
+                try:
+                    async with session.begin_nested():
+                        session.add(snapshot)
+                        await session.flush()
+                except IntegrityError:
+                    snapshot = await session.scalar(
+                        select(EvidenceSnapshot).where(
+                            EvidenceSnapshot.fingerprint == evidence_fingerprint
+                        )
+                    )
+                    if snapshot is None:
+                        raise
             won = (signal.outcome_label or "").upper() == outcome
             payout = position.shares if won else Decimal("0")
             realized = payout - position.amount
@@ -683,8 +744,28 @@ class PaperLifecycle:
                     "evidence_fingerprint": evidence_fingerprint,
                 },
             )
-            session.add(settlement)
-            await session.flush()
+            try:
+                async with session.begin_nested():
+                    session.add(settlement)
+                    await session.flush()
+            except IntegrityError:
+                replay = await session.scalar(
+                    select(PaperSettlement).where(
+                        (PaperSettlement.position_id == position_id)
+                        | (PaperSettlement.request_id == normalized_request_id)
+                    )
+                )
+                if replay is None:
+                    raise
+                _assert_request_matches(
+                    replay.request_id,
+                    replay.actor,
+                    replay.request_fingerprint,
+                    normalized_request_id,
+                    actor,
+                    request_fingerprint,
+                )
+                return _settlement_result(replay)
             position.status = "settled"
             position.current_mark = Decimal("1") if won else Decimal("0")
             position.unrealized_pnl = Decimal("0")
@@ -818,21 +899,56 @@ def _derive_settlement_outcome(
         raise PaperTradingError("settlement observation timestamp mismatch")
     if (signal.outcome_label or "").upper() not in {"YES", "NO"}:
         raise PaperTradingError("signal outcome mapping is invalid")
+    if contract.domain == "weather":
+        return _derive_weather_settlement_outcome(contract, signal, evidence)
     if contract.domain != "crypto":
         raise PaperTradingError(f"settlement domain unsupported: {contract.domain}")
     data = contract.contract_data
     values = evidence.normalized_values
-    if values.get("asset") != data.get("asset") or values.get("quote") != data.get("quote"):
-        raise PaperTradingError("settlement asset or quote mismatch")
-    if values.get("price_definition") != data.get("price_definition"):
-        raise PaperTradingError("settlement price definition mismatch")
-    if (
-        evidence.raw_payload is not None
-        and _hash(evidence.raw_payload) != evidence.raw_response_hash
-    ):
+    if evidence.raw_payload is None:
+        raise PaperTradingError("settlement raw payload is required")
+    if not re.fullmatch(r"[0-9a-f]{64}", evidence.raw_response_hash):
+        raise PaperTradingError("settlement raw payload hash is invalid")
+    if canonical_payload_hash(evidence.raw_payload) != evidence.raw_response_hash:
         raise PaperTradingError("settlement raw payload hash mismatch")
     try:
-        price = Decimal(str(values["price"]))
+        derived = normalize_crypto_settlement_payload(
+            evidence.source.strip().lower(),
+            evidence.raw_payload,
+            asset=str(data["asset"]),
+            quote=str(data["quote"]),
+            expiry=evidence.observed_at,
+        )
+    except (CryptoDataQualityError, KeyError, ValueError) as exc:
+        raise PaperTradingError(str(exc)) from exc
+    if str(values.get("asset", "")).upper() != derived["asset"]:
+        raise PaperTradingError("settlement normalized asset contradicts raw payload")
+    if str(values.get("quote", "")).upper() != derived["quote"]:
+        raise PaperTradingError("settlement normalized quote contradicts raw payload")
+    try:
+        normalized_price = Decimal(str(values["price"]))
+    except (KeyError, InvalidOperation) as exc:
+        raise PaperTradingError("settlement normalized price contradicts raw payload") from exc
+    if normalized_price != Decimal(derived["price"]):
+        raise PaperTradingError("settlement normalized price contradicts raw payload")
+    if str(values.get("price_definition", "")).strip().lower() != derived[
+        "price_definition"
+    ]:
+        raise PaperTradingError("settlement normalized price_definition contradicts raw payload")
+    try:
+        normalized_timestamp = datetime.fromisoformat(
+            str(values["source_timestamp"]).replace("Z", "+00:00")
+        )
+    except (KeyError, ValueError) as exc:
+        raise PaperTradingError(
+            "settlement normalized source_timestamp contradicts raw payload"
+        ) from exc
+    if normalized_timestamp.tzinfo is None or _utc_key(normalized_timestamp) != derived[
+        "source_timestamp"
+    ]:
+        raise PaperTradingError("settlement normalized source_timestamp contradicts raw payload")
+    try:
+        price = Decimal(derived["price"])
         increment = Decimal(str(data["rounding_increment"]))
     except (KeyError, InvalidOperation, TypeError, ValueError) as exc:
         raise PaperTradingError("settlement price is invalid") from exc
@@ -862,6 +978,74 @@ def _derive_settlement_outcome(
     return outcome
 
 
+def _derive_weather_settlement_outcome(
+    contract: DomainContract, signal: Signal, evidence: SettlementEvidence
+) -> str:
+    data = contract.contract_data
+    if evidence.raw_payload is None:
+        raise PaperTradingError("settlement raw payload is required")
+    if not re.fullmatch(r"[0-9a-f]{64}", evidence.raw_response_hash):
+        raise PaperTradingError("settlement raw payload hash is invalid")
+    if canonical_payload_hash(evidence.raw_payload) != evidence.raw_response_hash:
+        raise PaperTradingError("settlement raw payload hash mismatch")
+    if not isinstance(evidence.raw_payload, dict):
+        raise PaperTradingError("weather settlement payload is invalid")
+    rows = evidence.raw_payload.get("observations")
+    if not isinstance(rows, list) or not rows:
+        raise PaperTradingError("weather settlement observations missing")
+    station = str(data.get("station_id", ""))
+    source = str(contract.resolution_source or "")
+    timezone = str(data.get("timezone", ""))
+    local_date = str(data.get("local_date", ""))
+    temperatures: list[float] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise PaperTradingError("weather settlement observation invalid")
+        try:
+            observed = datetime.fromisoformat(str(row["observed_at"]).replace("Z", "+00:00"))
+            temperature = float(row["air_temperature"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PaperTradingError("weather settlement observation invalid") from exc
+        if observed.tzinfo is None:
+            raise PaperTradingError("weather observation timestamp is naive")
+        if row.get("station_id") != station or row.get("source") != source:
+            raise PaperTradingError("weather settlement station or source mismatch")
+        if observed.astimezone(ZoneInfo(timezone)).date().isoformat() != local_date:
+            raise PaperTradingError("weather observation outside reporting window")
+        temperatures.append(temperature)
+    if str(data.get("measurement", "")).lower() != "daily maximum air temperature":
+        raise PaperTradingError("weather settlement measurement unsupported")
+    try:
+        rounded = round_temperature(
+            max(temperatures), RoundingMethod(str(data["rounding_method"]))
+        )
+        raw_buckets = data["buckets"]
+        if not isinstance(raw_buckets, list):
+            raise TypeError("weather buckets must be a list")
+        buckets = tuple(Bucket.model_validate(item) for item in raw_buckets)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PaperTradingError("weather settlement contract invalid") from exc
+    bucket = next((item for item in buckets if item.contains(rounded)), None)
+    if bucket is None:
+        raise PaperTradingError("weather observation maps to no outcome bucket")
+    expected = signal.outcome_label
+    if not expected:
+        raise PaperTradingError("weather signal outcome label missing")
+    outcome = "YES" if bucket.label == expected else "NO"
+    normalized = evidence.normalized_values
+    if (
+        normalized.get("station_id") != station
+        or normalized.get("source") != source
+        or normalized.get("local_date") != local_date
+        or Decimal(str(normalized.get("rounded_value"))) != Decimal(str(rounded))
+        or normalized.get("bucket_label") != bucket.label
+    ):
+        raise PaperTradingError("weather normalized values contradict observations")
+    if evidence.outcome_label is not None and evidence.outcome_label.strip().upper() != outcome:
+        raise PaperTradingError("settlement claimed outcome conflicts with observation")
+    return outcome
+
+
 def _assert_request_matches(
     stored_request_id: str | None,
     stored_actor: str | None,
@@ -876,6 +1060,21 @@ def _assert_request_matches(
         or stored_fingerprint != fingerprint
     ):
         raise PaperIdempotencyConflict(request_id)
+
+
+async def _existing_execution_decision(
+    session: AsyncSession, signal_id: int, request_id: str
+) -> PaperExecutionDecision | None:
+    """Recover the winner after a signal-id or request-id uniqueness race."""
+    return cast(
+        PaperExecutionDecision | None,
+        await session.scalar(
+            select(PaperExecutionDecision).where(
+                (PaperExecutionDecision.signal_id == signal_id)
+                | (PaperExecutionDecision.request_id == request_id)
+            )
+        )
+    )
 
 
 def _settlement_result(settlement: PaperSettlement) -> dict[str, object]:
@@ -898,3 +1097,11 @@ def _hash(value: object) -> str:
 
 def _money(value: Decimal) -> str:
     return format(value.quantize(Decimal("0.00000001")), "f")
+
+
+def _decimal_key(value: Decimal) -> str:
+    return format(value.normalize(), "f")
+
+
+def _utc_key(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat()

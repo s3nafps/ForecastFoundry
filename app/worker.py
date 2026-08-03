@@ -452,6 +452,7 @@ async def scan_once(
                     market_id=market.id,
                     outcome_id=yes.id,
                     contract_id=contract.id,
+                    outcome_label=source_market.group_item_title,
                     generated_at=now,
                     model_probability=probability,
                     executable_ask=book.best_ask,
