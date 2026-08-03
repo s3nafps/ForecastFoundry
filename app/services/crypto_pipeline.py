@@ -124,7 +124,11 @@ class CryptoPaperPipeline:
             return await self._reject_contract(market, route, captured_at, (str(exc),))
 
         current_price = series.candles[-1].close
-        threshold = contract.threshold or contract.comparison_reference_price
+        threshold = (
+            contract.threshold
+            if contract.threshold is not None
+            else contract.comparison_reference_price
+        )
         estimate = estimate_crypto_probability(
             series.log_returns,
             current_price=current_price,
@@ -136,7 +140,7 @@ class CryptoPaperPipeline:
             seed=seed,
             samples=samples,
         )
-        evidence_values = _evidence_values(market, contract, gamma, series)
+        evidence_values = _evidence_values(market, contract, gamma, series, self.settings)
         evidence_fingerprint = _fingerprint(
             {
                 "contract": market.market_id,
@@ -188,6 +192,7 @@ class CryptoPaperPipeline:
                 captured_at,
                 ("pricing_unavailable",),
                 fingerprint_seed={"input_hash": input_hash, "policy": policy},
+                gamma=gamma,
                 policy=policy,
             )
         books: tuple[OrderBook, ...] = ()
@@ -212,6 +217,7 @@ class CryptoPaperPipeline:
                 },
                 gamma=gamma,
                 books={book.asset_id: book for book in books},
+                returned_books=books,
                 policy=policy,
             )
 
@@ -467,7 +473,7 @@ class CryptoPaperPipeline:
                     buffers=cast(dict[str, str], candidate["buffers"]),
                     fingerprint=fingerprint,
                     freshness_seconds=cast(int, candidate["freshness_seconds"]),
-                    signal_data=_candidate_data(gamma, books, candidate, policy),
+                    signal_data=_candidate_data(gamma, books, candidate, policy, self.settings),
                 )
                 try:
                     async with session.begin_nested():
@@ -507,6 +513,7 @@ class CryptoPaperPipeline:
         candidate: dict[str, object] | None = None,
         gamma: GammaMarket | None = None,
         books: dict[str, OrderBook] | None = None,
+        returned_books: Sequence[OrderBook] | None = None,
         policy: dict[str, str] | None = None,
     ) -> dict[str, object]:
         normalized_reasons = tuple(dict.fromkeys(reasons))
@@ -545,10 +552,20 @@ class CryptoPaperPipeline:
                     generated_at=captured_at,
                     reasons=list(normalized_reasons),
                     candidate_data=(
-                        _candidate_data(gamma, books or {}, candidate, policy or {})
+                        _candidate_data(
+                            gamma,
+                            books or {},
+                            candidate,
+                            policy or {},
+                            self.settings,
+                        )
                         if candidate and gamma
                         else _rejected_pricing_data(
-                            market.market_id, gamma, books or {}, policy or {}
+                            market.market_id,
+                            gamma,
+                            returned_books or tuple((books or {}).values()),
+                            policy or {},
+                            self.settings,
                         )
                     ),
                 )
@@ -799,6 +816,7 @@ def _evidence_values(
     contract: CryptoContract,
     gamma: GammaMarket,
     series: CryptoSeries,
+    settings: Settings,
 ) -> dict[str, object]:
     return {
         "market_id": market.market_id,
@@ -820,10 +838,13 @@ def _evidence_values(
         },
         "market_acquisition": {
             "provider": "polymarket_gamma",
+            "method": "GET",
+            "market_url": f"{settings.gamma_api_url.rstrip('/')}/markets/{gamma.id}",
             "market_id": gamma.id,
             "condition_id": gamma.condition_id,
             "resolution_source": gamma.resolution_source,
             "gamma_market_hash": _fingerprint(gamma.model_dump(mode="json")),
+            "raw_response": gamma.model_dump(mode="json"),
         },
     }
 
@@ -833,6 +854,7 @@ def _candidate_data(
     books: dict[str, OrderBook],
     candidate: dict[str, object],
     policy: dict[str, str],
+    settings: Settings,
 ) -> dict[str, object]:
     return {
         "market": {
@@ -847,25 +869,8 @@ def _candidate_data(
             for key, value in candidate.items()
         },
         "policy": policy,
-        "pricing_acquisition": {
-            "provider": "polymarket_clob",
-            "operation": "get_order_books",
-        },
-        "order_books": {
-            outcome: {
-                "token_id": book.asset_id,
-                "timestamp": book.timestamp,
-                "best_bid": str(book.best_bid) if book.best_bid is not None else None,
-                "best_ask": str(book.best_ask) if book.best_ask is not None else None,
-                "midpoint": str(book.midpoint) if book.midpoint is not None else None,
-                "spread": str(book.spread) if book.spread is not None else None,
-                "available_depth": str(book.available_depth),
-                "minimum_order_size": str(book.minimum_order_size),
-                "tick_size": str(book.tick_size),
-                "raw_response_hash": _fingerprint(book.raw_data),
-            }
-            for outcome, book in books.items()
-        },
+        "pricing_acquisition": _pricing_acquisition(gamma, settings),
+        "order_books": {outcome: _book_record(book) for outcome, book in books.items()},
     }
 
 
@@ -887,18 +892,57 @@ def _pricing_policy(settings: Settings) -> dict[str, str]:
 def _rejected_pricing_data(
     market_id: str,
     gamma: GammaMarket | None,
-    books: dict[str, OrderBook],
+    books: Sequence[OrderBook],
     policy: dict[str, str],
+    settings: Settings,
 ) -> dict[str, object]:
     return {
         "market_id": market_id,
         "condition_id": gamma.condition_id if gamma else None,
         "policy": policy,
-        "pricing_acquisition": {
-            "provider": "polymarket_clob",
-            "operation": "get_order_books",
-            "book_hashes": sorted(_fingerprint(book.raw_data) for book in books.values()),
-        },
+        "pricing_acquisition": (
+            _pricing_acquisition(gamma, settings)
+            if gamma
+            else {
+                "provider": "polymarket_clob",
+                "method": "POST",
+                "endpoint": f"{settings.clob_api_url.rstrip('/')}/books",
+                "request_payload": [],
+            }
+        ),
+        "returned_books": [_book_record(book) for book in books],
+    }
+
+
+def _pricing_acquisition(gamma: GammaMarket, settings: Settings) -> dict[str, object]:
+    tokens_by_outcome = {
+        label.strip().upper(): token_id
+        for label, token_id in zip(gamma.outcomes, gamma.token_ids, strict=True)
+    }
+    return {
+        "provider": "polymarket_clob",
+        "method": "POST",
+        "endpoint": f"{settings.clob_api_url.rstrip('/')}/books",
+        "request_payload": [{"token_id": tokens_by_outcome[outcome]} for outcome in ("YES", "NO")],
+    }
+
+
+def _book_record(book: OrderBook) -> dict[str, object]:
+    return {
+        "token_id": book.asset_id,
+        "condition_id": book.condition_id,
+        "timestamp": book.timestamp,
+        "bids": [{"price": str(level.price), "size": str(level.size)} for level in book.bids],
+        "asks": [{"price": str(level.price), "size": str(level.size)} for level in book.asks],
+        "best_bid": str(book.best_bid) if book.best_bid is not None else None,
+        "best_ask": str(book.best_ask) if book.best_ask is not None else None,
+        "midpoint": str(book.midpoint) if book.midpoint is not None else None,
+        "spread": str(book.spread) if book.spread is not None else None,
+        "available_depth": str(book.available_depth),
+        "minimum_order_size": str(book.minimum_order_size),
+        "tick_size": str(book.tick_size),
+        "raw_response_hash": _fingerprint(book.raw_data),
+        "raw_response": json.loads(json.dumps(book.raw_data, sort_keys=True, default=str)),
     }
 
 

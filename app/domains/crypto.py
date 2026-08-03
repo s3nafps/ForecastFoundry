@@ -121,6 +121,8 @@ def parse_crypto_market(market: MarketInput) -> CryptoMarketResult:
         else:
             try:
                 threshold = Decimal(threshold_match.group(1).replace(",", ""))
+                if threshold <= 0:
+                    reasons.append("threshold_non_positive")
             except InvalidOperation:
                 reasons.append("threshold_invalid")
     else:
@@ -195,22 +197,32 @@ def _parse_expiry(text: str) -> datetime | None:
 
 def normalize_named_resolution_source(text: str) -> str:
     lowered = text.lower()
-    if re.search(
-        r"\b(?:not|excluding|except)\s+(?:the\s+)?"
-        r"(?:coinbase|binance|kraken|chainlink|pyth|cf\s+benchmarks)\b",
-        lowered,
-    ):
-        raise ValueError("resolution_source_negated")
     found = tuple(
-        name
+        (marker, name)
         for marker, name in CryptoPlugin._source_names.items()
-        if re.search(rf"\b{marker}\b", lowered)
+        if re.search(rf"\b{marker.replace(' ', r'\s+')}\b", lowered)
     )
     if not found:
         raise ValueError("resolution_source_missing")
     if len(found) != 1:
         raise ValueError("resolution_source_ambiguous")
-    return found[0]
+    if re.search(
+        r"\b(?:not|never|excluding|except)\b|\b(?:other|rather)\s+than\b|\binstead\s+of\b",
+        lowered,
+    ):
+        raise ValueError("resolution_source_negated")
+    marker, name = found[0]
+    marker_pattern = marker.replace(" ", r"\s+")
+    positive_patterns = (
+        rf"^\s*(?:the\s+)?{marker_pattern}\s*$",
+        rf"\b(?:on|from|using|uses|use|per|according\s+to)\s+(?:the\s+)?{marker_pattern}\b",
+        rf"\b(?:source|resolution\s+source)\s*(?::|is)?\s+(?:the\s+)?{marker_pattern}\b",
+        rf"\b{marker_pattern}\s+[a-z0-9]{{2,12}}\s*[-/]\s*"
+        rf"(?:usd|usdt|usdc|eur)\b",
+    )
+    if not any(re.search(pattern, lowered) for pattern in positive_patterns):
+        raise ValueError("resolution_source_missing")
+    return name
 
 
 def _parse_comparison_reference(text: str) -> tuple[Decimal | None, datetime | None]:

@@ -32,6 +32,7 @@ from app.services.crypto_data import (
     normalize_candles,
 )
 from app.services.crypto_pipeline import CryptoPaperPipeline
+from app.services.polymarket import parse_order_book
 
 NOW = datetime(2026, 8, 3, 12, 30, tzinfo=UTC)
 FIXTURE = json.loads(
@@ -500,6 +501,72 @@ def test_crypto_signal_migration_round_trips(tmp_path: Path) -> None:
     assert "contract_id" not in signal_columns
 
 
+def test_crypto_signal_migration_consolidates_duplicate_predictions_with_audit_data(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "crypto-signal-duplicate-predictions.db"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path.as_posix()}")
+    command.upgrade(config, "0006")
+    created = NOW.isoformat()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO domain_contracts "
+            "(market_external_id, domain, accepted, contract_data, rejection_reasons, "
+            "provenance, fingerprint, created_at, updated_at) VALUES "
+            "('duplicate-prediction', 'crypto', 1, '{}', '[]', '{}', 'contract-duplicate', ?, ?)",
+            (created, created),
+        )
+        contract_id = connection.execute(
+            "SELECT id FROM domain_contracts WHERE fingerprint = 'contract-duplicate'"
+        ).fetchone()[0]
+        for model_version in ("original", "retry"):
+            connection.execute(
+                "INSERT INTO prediction_runs "
+                "(contract_id, generated_at, model_name, model_version, input_hash, parameters, "
+                "probabilities, status) VALUES (?, ?, 'crypto', ?, 'same-input', '{}', '{}', "
+                "'signal_candidate')",
+                (contract_id, created, model_version),
+            )
+        prediction_ids = [
+            row[0]
+            for row in connection.execute("SELECT id FROM prediction_runs ORDER BY id").fetchall()
+        ]
+        connection.execute(
+            "INSERT INTO prediction_features "
+            "(prediction_run_id, name, value, source, live_eligible) VALUES "
+            "(?, 'return_history', '[1]', 'coinbase', 1), "
+            "(?, 'return_history', '[2]', 'coinbase', 1)",
+            prediction_ids,
+        )
+        for prediction_id, score in zip(prediction_ids, ("0.10", "0.20"), strict=True):
+            connection.execute(
+                "INSERT INTO calibration_metrics "
+                "(prediction_run_id, model_name, window_start, window_end, brier_score, "
+                "reliability_buckets) VALUES (?, 'crypto', ?, ?, ?, '[]')",
+                (prediction_id, created, created, score),
+            )
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        predictions = connection.execute(
+            "SELECT id, model_version FROM prediction_runs WHERE contract_id = ? AND input_hash = "
+            "'same-input'",
+            (contract_id,),
+        ).fetchall()
+        features = connection.execute(
+            "SELECT prediction_run_id, value FROM prediction_features ORDER BY id"
+        ).fetchall()
+        metrics = connection.execute(
+            "SELECT prediction_run_id, brier_score FROM calibration_metrics ORDER BY id"
+        ).fetchall()
+
+    assert predictions == [(prediction_ids[0], "original")]
+    assert features == [(prediction_ids[0], "[1]"), (prediction_ids[0], "[2]")]
+    assert metrics == [(prediction_ids[0], 0.1), (prediction_ids[0], 0.2)]
+
+
 @pytest.mark.asyncio
 async def test_uses_minimum_size_vwap_across_multiple_ask_levels(tmp_path: Path) -> None:
     pipeline, engine, _ = await _pipeline(
@@ -528,6 +595,55 @@ async def test_uses_minimum_size_vwap_across_multiple_ask_levels(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_persisted_real_book_levels_reproduce_minimum_size_vwap(tmp_path: Path) -> None:
+    raw_books = json.loads(
+        (Path(__file__).parent / "fixtures" / "crypto" / "multi_level_books.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    books = tuple(parse_order_book(payload) for payload in raw_books)
+    pipeline, engine, _ = await _pipeline(tmp_path, books=books)
+
+    result = await pipeline.run(
+        _market(expiry=datetime(2026, 8, 3, 16, tzinfo=UTC)),
+        now=NOW,
+        seed=7,
+        samples=500,
+    )
+
+    assert result["status"] == "accepted"
+    async with pipeline.sessions() as session:
+        signal = await session.scalar(select(Signal))
+        evidence = await session.scalar(select(EvidenceSnapshot))
+    assert signal is not None
+    assert evidence is not None
+    persisted = signal.signal_data
+    assert persisted["pricing_acquisition"] == {
+        "provider": "polymarket_clob",
+        "method": "POST",
+        "endpoint": "https://clob.polymarket.com/books",
+        "request_payload": [{"token_id": "yes-token"}, {"token_id": "no-token"}],
+    }
+    selected = persisted["order_books"][persisted["candidate"]["outcome"]]
+    remaining = Decimal(persisted["candidate"]["required_size"])
+    cost = Decimal("0")
+    for level in selected["asks"]:
+        filled = min(remaining, Decimal(level["size"]))
+        cost += filled * Decimal(level["price"])
+        remaining -= filled
+        if remaining == 0:
+            break
+    assert remaining == 0
+    assert cost / Decimal(persisted["candidate"]["required_size"]) == signal.executable_ask
+    assert selected["bids"] == [{"price": "0.38", "size": "100"}]
+    assert selected["raw_response"] == raw_books[0]
+    acquisition = evidence.normalized_values["market_acquisition"]
+    assert acquisition["market_url"] == "https://gamma-api.polymarket.com/markets/crypto-market"
+    assert acquisition["raw_response"]["id"] == "crypto-market"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_rejects_when_asks_cannot_fill_minimum_size(tmp_path: Path) -> None:
     pipeline, engine, _ = await _pipeline(
         tmp_path,
@@ -541,6 +657,14 @@ async def test_rejects_when_asks_cannot_fill_minimum_size(tmp_path: Path) -> Non
 
     assert result["status"] == "rejected"
     assert "insufficient_executable_depth" in result["reasons"]
+    async with pipeline.sessions() as session:
+        rejected = await session.scalar(select(RejectedSignal))
+    assert rejected is not None
+    assert rejected.candidate_data["pricing_acquisition"]["endpoint"].endswith("/books")
+    assert rejected.candidate_data["order_books"]["YES"]["asks"] == [
+        {"price": "0.40", "size": "2"},
+        {"price": "0.50", "size": "2"},
+    ]
     await engine.dispose()
 
 
@@ -567,6 +691,80 @@ async def test_rejects_empty_gamma_resolution_source(tmp_path: Path) -> None:
     result = await pipeline.run(market.model_copy(update={"raw_data": {"market": raw}}), now=NOW)
 
     assert result["reasons"] == ["resolution_source_missing"]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "resolution_source",
+    (
+        "Coinbase will not be used",
+        "other than Coinbase",
+        "instead of Coinbase",
+        "Coinbase or Kraken",
+    ),
+)
+async def test_rejects_noncanonical_gamma_resolution_source(
+    tmp_path: Path, resolution_source: str
+) -> None:
+    pipeline, engine, _ = await _pipeline(tmp_path)
+    market = _market(expiry=datetime(2026, 8, 3, 16, tzinfo=UTC))
+    raw = dict(market.raw_data["market"])
+    raw["resolution_source"] = resolution_source
+
+    result = await pipeline.run(market.model_copy(update={"raw_data": {"market": raw}}), now=NOW)
+
+    assert result["status"] == "rejected"
+    assert {
+        "resolution_source_negated",
+        "resolution_source_ambiguous",
+        "resolution_source_missing",
+    } & set(result["reasons"])
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_zero_threshold_rejects_without_escaping_pipeline(tmp_path: Path) -> None:
+    pipeline, engine, _ = await _pipeline(tmp_path)
+
+    result = await pipeline.run(
+        _market(expiry=datetime(2026, 8, 3, 16, tzinfo=UTC), threshold=Decimal("0")),
+        now=NOW,
+    )
+
+    assert result["status"] == "rejected"
+    assert result["reasons"] == ["threshold_non_positive"]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mapping_rejection_persists_returned_book_acquisition(tmp_path: Path) -> None:
+    raw_books = json.loads(
+        (Path(__file__).parent / "fixtures" / "crypto" / "multi_level_books.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    extra = dict(raw_books[0])
+    extra["asset_id"] = "unexpected-token"
+    books = tuple(parse_order_book(payload) for payload in [*raw_books, extra])
+    pipeline, engine, _ = await _pipeline(tmp_path, books=books)
+
+    result = await pipeline.run(_market(expiry=datetime(2026, 8, 3, 16, tzinfo=UTC)), now=NOW)
+
+    assert "order_book_token_set_mismatch" in result["reasons"]
+    async with pipeline.sessions() as session:
+        rejected = await session.scalar(select(RejectedSignal))
+    assert rejected is not None
+    acquisition = rejected.candidate_data["pricing_acquisition"]
+    assert acquisition["request_payload"] == [
+        {"token_id": "yes-token"},
+        {"token_id": "no-token"},
+    ]
+    assert [book["token_id"] for book in rejected.candidate_data["returned_books"]] == [
+        "yes-token",
+        "no-token",
+        "unexpected-token",
+    ]
     await engine.dispose()
 
 

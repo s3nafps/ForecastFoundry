@@ -30,6 +30,55 @@ def upgrade() -> None:
         batch_op.create_unique_constraint("uq_evidence_snapshots_fingerprint", ["fingerprint"])
     op.create_index("ix_evidence_snapshots_contract_id", "evidence_snapshots", ["contract_id"])
 
+    connection = op.get_bind()
+    predictions = sa.table(
+        "prediction_runs",
+        sa.column("id", sa.Integer()),
+        sa.column("contract_id", sa.Integer()),
+        sa.column("input_hash", sa.String()),
+    )
+    features = sa.table(
+        "prediction_features",
+        sa.column("prediction_run_id", sa.Integer()),
+    )
+    metrics = sa.table(
+        "calibration_metrics",
+        sa.column("prediction_run_id", sa.Integer()),
+    )
+    duplicate_identities = connection.execute(
+        sa.select(predictions.c.contract_id, predictions.c.input_hash)
+        .where(predictions.c.contract_id.is_not(None))
+        .group_by(predictions.c.contract_id, predictions.c.input_hash)
+        .having(sa.func.count(predictions.c.id) > 1)
+        .order_by(predictions.c.contract_id, predictions.c.input_hash)
+    ).all()
+    for contract_id, input_hash in duplicate_identities:
+        prediction_ids = (
+            connection.execute(
+                sa.select(predictions.c.id)
+                .where(
+                    predictions.c.contract_id == contract_id,
+                    predictions.c.input_hash == input_hash,
+                )
+                .order_by(predictions.c.id)
+            )
+            .scalars()
+            .all()
+        )
+        keeper_id, *duplicate_ids = prediction_ids
+        # Both 0006 dependents retain their audit rows while moving to the deterministic keeper.
+        connection.execute(
+            features.update()
+            .where(features.c.prediction_run_id.in_(duplicate_ids))
+            .values(prediction_run_id=keeper_id)
+        )
+        connection.execute(
+            metrics.update()
+            .where(metrics.c.prediction_run_id.in_(duplicate_ids))
+            .values(prediction_run_id=keeper_id)
+        )
+        connection.execute(predictions.delete().where(predictions.c.id.in_(duplicate_ids)))
+
     with op.batch_alter_table("prediction_runs") as batch_op:
         batch_op.add_column(sa.Column("evidence_snapshot_id", sa.Integer(), nullable=True))
         batch_op.create_foreign_key(

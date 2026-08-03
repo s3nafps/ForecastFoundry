@@ -81,6 +81,32 @@ def test_rejects_negated_and_multiple_resolution_sources() -> None:
     assert "resolution_source_ambiguous" in multiple.reasons
 
 
+def test_rejects_noncanonical_and_trailing_negated_resolution_sources() -> None:
+    descriptions = (
+        "Coinbase will not be used for the BTC-USD closing price, rounded to a dollar.",
+        "Use a BTC-USD closing price other than Coinbase, rounded to a dollar.",
+        "Use another BTC-USD closing price instead of Coinbase, rounded to a dollar.",
+        "A rumor mentions Coinbase; BTC-USD closing price, rounded to a dollar.",
+    )
+
+    results = tuple(
+        parse_crypto_market(
+            MarketInput(
+                market_id=f"invalid-source-{index}",
+                title="Will BTC be above $100 at 2026-09-01 00:00 UTC?",
+                description=description,
+            )
+        )
+        for index, description in enumerate(descriptions)
+    )
+
+    assert all(result.accepted is False for result in results)
+    assert all(
+        {"resolution_source_negated", "resolution_source_missing"} & set(result.reasons)
+        for result in results
+    )
+
+
 def test_contract_persists_exact_comparison_and_rounding_semantics() -> None:
     result = parse_crypto_market(
         MarketInput(
@@ -110,3 +136,16 @@ def test_contract_accepts_plural_cents_rounding_definition() -> None:
     assert result.accepted is True
     assert result.contract is not None
     assert result.contract.rounding_increment == Decimal("0.01")
+
+
+def test_rejects_non_positive_threshold_during_normalization() -> None:
+    result = parse_crypto_market(
+        MarketInput(
+            market_id="zero-threshold",
+            title="Will BTC be above $0 at 2026-09-01 00:00 UTC?",
+            description="Coinbase BTC-USD closing price, rounded to cents.",
+        )
+    )
+
+    assert result.accepted is False
+    assert "threshold_non_positive" in result.reasons
