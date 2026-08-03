@@ -184,6 +184,9 @@ class ProviderRegistry:
         except KeyError as exc:
             raise KeyError(f"unknown provider: {name}") from exc
 
+    def specs(self) -> tuple[ProviderSpec, ...]:
+        return tuple(self._specs.values())
+
     def resolve_secret(self, name: str) -> str | None:
         spec = self.get(name)
         if spec.auth == "none":

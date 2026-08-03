@@ -5,6 +5,7 @@
   <div class="card"><strong>Balance</strong><br>{{ performance.current_balance }}</div>
   <div class="card"><strong>Positions</strong><br>{{ performance.positions }}</div>
   <div class="card"><strong>Realized P&amp;L</strong><br>{{ performance.realized_pnl }}</div>
+  <div class="card"><strong>Mode</strong><br>{{ execution.mode }}{% if execution.paused %} · paused{% endif %}</div>
 </section>
 <h2>Discovered markets</h2>
 {% if markets %}<ul>{% for market in markets %}<li><a href="/markets/{{ market.id }}">{{ market.event }} — {{ market.question }}</a></li>{% endfor %}</ul>{% else %}<p>No markets recorded yet.</p>{% endif %}

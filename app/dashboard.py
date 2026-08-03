@@ -7,6 +7,7 @@ from fastapi.templating import Jinja2Templates
 from app.api import (
     config,
     error_rows,
+    execution_status,
     market_detail,
     market_rows,
     performance_data,
@@ -28,6 +29,7 @@ async def overview(request: Request) -> Response:
             "title": "Overview",
             "markets": markets,
             "performance": await performance_data(request),
+            "execution": await execution_status(request),
         },
     )
 

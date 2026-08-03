@@ -1,14 +1,18 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 from sqlalchemy import select
-
 from app import COMPATIBILITY_VERSION, PRODUCT_NAME
 from app.models import (
     ApplicationSetting,
+    EvidenceSnapshot,
+    ExecutionOrder,
     Event,
     ForecastMember,
     ForecastRun,
+    KillSwitchEvent,
     Market,
     NormalizedRule,
     OrderBookSnapshot,
@@ -16,11 +20,19 @@ from app.models import (
     PaperSettlement,
     ProbabilityEstimate,
     ProviderError,
+    ReconciliationEvent,
     RejectedSignal,
     Signal,
 )
+from app.mcp_policy import MCPPolicyError, audit_operator_action, require_operator
+from app.providers.registry import ProviderRegistry
 
 router = APIRouter(prefix="/api/v1")
+
+
+class OperatorAction(BaseModel):
+    token: str
+    reason: str
 
 
 async def market_rows(request: Request) -> list[dict[str, object]]:
@@ -300,3 +312,138 @@ async def config(request: Request) -> dict[str, object]:
         "max_spread": settings.max_spread,
         "min_liquidity_usd": settings.min_liquidity_usd,
     }
+
+
+@router.get("/domains")
+async def domains() -> dict[str, object]:
+    return {"domains": ["weather", "crypto"], "mode": "PAPER_ONLY"}
+
+
+@router.get("/providers/health")
+async def provider_health() -> dict[str, object]:
+    specs = ProviderRegistry.default().specs()
+    return {
+        "providers": [
+            {
+                "name": spec.name,
+                "domain": "crypto" if spec.name in {"coinbase", "binance", "kraken"} else "weather",
+                "auth": spec.auth,
+                "classification": spec.classification,
+                "freshness_seconds": spec.freshness_seconds,
+                "status": "not_checked",
+            }
+            for spec in specs
+        ],
+        "secret_values": False,
+    }
+
+
+@router.get("/execution/status")
+async def execution_status(request: Request) -> dict[str, object]:
+    settings = request.app.state.settings
+    async with request.app.state.sessions() as session:
+        paused = await session.get(ApplicationSetting, "paused")
+    return {
+        "mode": "LIVE_GATED" if settings.execution_enabled else "PAPER_ONLY",
+        "live_execution": settings.execution_enabled,
+        "closed_only": settings.closed_only,
+        "paused": bool(paused and paused.value is True),
+        "kill_switch_active": bool(paused and paused.value is True),
+        "wallet_custody": False,
+    }
+
+
+@router.get("/orders/reconciliation")
+async def reconciliation_orders(request: Request) -> list[dict[str, object]]:
+    async with request.app.state.sessions() as session:
+        orders = (
+            await session.scalars(select(ExecutionOrder).order_by(ExecutionOrder.created_at.desc()))
+        ).all()
+        events = (await session.scalars(select(ReconciliationEvent))).all()
+    events_by_order: dict[int, list[dict[str, object]]] = {}
+    for event in events:
+        if event.execution_order_id is not None:
+            events_by_order.setdefault(event.execution_order_id, []).append(
+                {
+                    "status": event.status,
+                    "event_type": event.event_type,
+                    "occurred_at": event.occurred_at,
+                }
+            )
+    return [
+        {
+            "id": order.id,
+            "mode": order.mode,
+            "provider": order.provider,
+            "client_order_id": order.client_order_id,
+            "provider_order_id": order.provider_order_id,
+            "status": order.status,
+            "live_authorized": order.live_authorized,
+            "reconciliation": events_by_order.get(order.id, []),
+        }
+        for order in orders
+    ]
+
+
+@router.get("/markets/{market_id}/evidence")
+async def market_evidence(market_id: int, request: Request) -> list[dict[str, object]]:
+    async with request.app.state.sessions() as session:
+        rows = (
+            await session.scalars(
+                select(EvidenceSnapshot)
+                .where(EvidenceSnapshot.market_id == market_id)
+                .order_by(EvidenceSnapshot.retrieved_at.desc())
+            )
+        ).all()
+    return [
+        {
+            "provider": row.provider,
+            "provider_version": row.provider_version,
+            "source_timestamp": row.source_timestamp,
+            "retrieved_at": row.retrieved_at,
+            "raw_response_hash": row.raw_response_hash,
+            "normalized_values": row.normalized_values,
+            "quality_flags": row.quality_flags,
+            "license_metadata": row.license_metadata,
+        }
+        for row in rows
+    ]
+
+
+async def _operator_action(
+    request: Request, payload: OperatorAction, *, paused: bool
+) -> dict[str, object]:
+    try:
+        require_operator(payload.token)
+    except MCPPolicyError as exc:
+        raise HTTPException(status_code=401, detail="operator authentication failed") from exc
+    if not payload.reason.strip():
+        raise HTTPException(status_code=400, detail="reason is required")
+    async with request.app.state.sessions() as session:
+        setting = await session.get(ApplicationSetting, "paused")
+        if setting is None:
+            session.add(ApplicationSetting(key="paused", value=paused))
+        else:
+            setting.value = paused
+        session.add(
+            KillSwitchEvent(
+                active=paused,
+                actor="api_operator",
+                reason=payload.reason,
+                triggered_at=datetime.now(UTC),
+                metadata_json={},
+            )
+        )
+        await session.commit()
+    audit_operator_action("pause_execution" if paused else "resume_execution", payload.reason)
+    return {"paused": paused, "reason": payload.reason}
+
+
+@router.post("/operator/pause")
+async def pause_operator(request: Request, payload: OperatorAction) -> dict[str, object]:
+    return await _operator_action(request, payload, paused=True)
+
+
+@router.post("/operator/resume")
+async def resume_operator(request: Request, payload: OperatorAction) -> dict[str, object]:
+    return await _operator_action(request, payload, paused=False)
