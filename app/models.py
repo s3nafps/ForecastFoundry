@@ -283,3 +283,186 @@ class ApplicationSetting(Base):
     key: Mapped[str] = mapped_column(String(120), primary_key=True)
     value: Mapped[object] = mapped_column(JSON)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class DomainContract(TimestampMixin, Base):
+    __tablename__ = "domain_contracts"
+    __table_args__ = (Index("ix_domain_contracts_domain_expiry", "domain", "expiry"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))
+    market_external_id: Mapped[str] = mapped_column(String(100), index=True)
+    domain: Mapped[str] = mapped_column(String(40), index=True)
+    accepted: Mapped[bool] = mapped_column(Boolean, index=True)
+    resolution_source: Mapped[str | None] = mapped_column(Text)
+    expiry: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
+    contract_data: Mapped[dict[str, object]] = mapped_column(JSON)
+    rejection_reasons: Mapped[list[str]] = mapped_column(JSON)
+    provenance: Mapped[dict[str, object]] = mapped_column(JSON)
+    fingerprint: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+
+
+class ProviderRegistryEntry(TimestampMixin, Base):
+    __tablename__ = "provider_registry"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    domain: Mapped[str] = mapped_column(String(40))
+    endpoint: Mapped[str] = mapped_column(Text)
+    auth_mode: Mapped[str] = mapped_column(String(24))
+    classification: Mapped[str] = mapped_column(String(24))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    metadata_json: Mapped[dict[str, object]] = mapped_column(JSON)
+
+
+class EvidenceSnapshot(Base):
+    __tablename__ = "evidence_snapshots"
+    __table_args__ = (Index("ix_evidence_provider_source_time", "provider", "source_timestamp"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))
+    provider: Mapped[str] = mapped_column(String(80))
+    provider_version: Mapped[str | None] = mapped_column(String(80))
+    source_timestamp: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    retrieved_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    raw_response_hash: Mapped[str] = mapped_column(String(128))
+    normalized_values: Mapped[dict[str, object]] = mapped_column(JSON)
+    quality_flags: Mapped[list[str]] = mapped_column(JSON)
+    freshness_seconds: Mapped[int | None] = mapped_column(Integer)
+    license_metadata: Mapped[dict[str, object]] = mapped_column(JSON)
+
+
+class PredictionRun(Base):
+    __tablename__ = "prediction_runs"
+    __table_args__ = (Index("ix_prediction_runs_market_generated", "market_id", "generated_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))
+    contract_id: Mapped[int | None] = mapped_column(
+        ForeignKey("domain_contracts.id", ondelete="SET NULL")
+    )
+    generated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    model_name: Mapped[str] = mapped_column(String(120))
+    model_version: Mapped[str] = mapped_column(String(80))
+    input_hash: Mapped[str] = mapped_column(String(128))
+    parameters: Mapped[dict[str, object]] = mapped_column(JSON)
+    probabilities: Mapped[dict[str, str]] = mapped_column(JSON)
+    uncertainty: Mapped[str | None] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(32))
+
+
+class PredictionFeature(Base):
+    __tablename__ = "prediction_features"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    prediction_run_id: Mapped[int] = mapped_column(
+        ForeignKey("prediction_runs.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(120))
+    value: Mapped[object] = mapped_column(JSON)
+    source: Mapped[str] = mapped_column(String(80))
+    live_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class CalibrationMetric(Base):
+    __tablename__ = "calibration_metrics"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    prediction_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prediction_runs.id", ondelete="SET NULL")
+    )
+    model_name: Mapped[str] = mapped_column(String(120))
+    window_start: Mapped[datetime] = mapped_column(UTCDateTime())
+    window_end: Mapped[datetime] = mapped_column(UTCDateTime())
+    brier_score: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    reliability_buckets: Mapped[list[dict[str, object]]] = mapped_column(JSON)
+
+
+class ResearchDocument(Base):
+    __tablename__ = "research_documents"
+    __table_args__ = (Index("ix_research_provider_published", "provider", "published_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(40))
+    external_id: Mapped[str] = mapped_column(String(200))
+    url: Mapped[str | None] = mapped_column(Text)
+    published_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    retrieved_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    content_hash: Mapped[str] = mapped_column(String(128))
+    redacted_text: Mapped[str] = mapped_column(Text)
+    feature_only: Mapped[bool] = mapped_column(Boolean, default=True)
+    metadata_json: Mapped[dict[str, object]] = mapped_column(JSON)
+
+
+class ExecutionOrder(Base):
+    __tablename__ = "execution_orders"
+    __table_args__ = (Index("ix_execution_orders_status_created", "status", "created_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))
+    outcome_id: Mapped[int | None] = mapped_column(ForeignKey("outcomes.id", ondelete="SET NULL"))
+    mode: Mapped[str] = mapped_column(String(16), default="paper", index=True)
+    provider: Mapped[str] = mapped_column(String(80))
+    client_order_id: Mapped[str] = mapped_column(String(120), unique=True)
+    provider_order_id: Mapped[str | None] = mapped_column(String(160), unique=True)
+    side: Mapped[str] = mapped_column(String(8))
+    price: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    size: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    live_authorized: Mapped[bool] = mapped_column(Boolean, default=False)
+    submitted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    metadata_json: Mapped[dict[str, object]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class ExecutionFill(Base):
+    __tablename__ = "execution_fills"
+    __table_args__ = (Index("ix_execution_fills_order_filled", "execution_order_id", "filled_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    execution_order_id: Mapped[int] = mapped_column(
+        ForeignKey("execution_orders.id", ondelete="CASCADE")
+    )
+    provider_fill_id: Mapped[str] = mapped_column(String(160), unique=True)
+    filled_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    price: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    size: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    fee: Mapped[Decimal] = mapped_column(Numeric(18, 8), default=Decimal("0"))
+    raw_data: Mapped[dict[str, object]] = mapped_column(JSON)
+
+
+class ReconciliationEvent(Base):
+    __tablename__ = "reconciliation_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    execution_order_id: Mapped[int | None] = mapped_column(
+        ForeignKey("execution_orders.id", ondelete="SET NULL")
+    )
+    event_type: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(24))
+    expected: Mapped[dict[str, object]] = mapped_column(JSON)
+    actual: Mapped[dict[str, object]] = mapped_column(JSON)
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class KillSwitchEvent(Base):
+    __tablename__ = "kill_switch_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    active: Mapped[bool] = mapped_column(Boolean, index=True)
+    actor: Mapped[str] = mapped_column(String(120))
+    reason: Mapped[str] = mapped_column(Text)
+    triggered_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    metadata_json: Mapped[dict[str, object]] = mapped_column(JSON)
+
+
+class KeystoreMetadata(Base):
+    __tablename__ = "keystore_metadata"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    path: Mapped[str] = mapped_column(Text, unique=True)
+    fingerprint: Mapped[str] = mapped_column(String(128), unique=True)
+    status: Mapped[str] = mapped_column(String(24))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    last_verified_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
