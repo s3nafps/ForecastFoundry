@@ -5,9 +5,9 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -19,6 +19,7 @@ from app.models import (
     EvidenceSnapshot,
     ExecutionFill,
     ExecutionOrder,
+    Market,
     PaperExecutionDecision,
     PaperPosition,
     PaperSettlement,
@@ -26,11 +27,23 @@ from app.models import (
     Signal,
 )
 from app.schemas import EntryQuote
+from app.services.execution_control import ExecutionControl
 from app.services.risk import RiskLimits, size_order
 
 
 class PaperTradingError(ValueError):
     pass
+
+
+class PaperIdempotencyConflict(RuntimeError):
+    code = "idempotency_conflict"
+
+    def __init__(self, request_id: str) -> None:
+        super().__init__("paper idempotency request is already bound to different arguments")
+        self.request_id = request_id
+
+    def as_dict(self) -> dict[str, object]:
+        return {"type": self.code, "message": str(self), "request_id": self.request_id}
 
 
 @dataclass(frozen=True)
@@ -41,12 +54,13 @@ class SettlementEvidence:
     source: str
     observed_at: datetime
     retrieved_at: datetime
-    outcome_label: str
+    outcome_label: str | None
     raw_response_hash: str
     normalized_values: dict[str, object]
     provider_version: str | None = None
     quality_flags: tuple[str, ...] = ()
     license_metadata: dict[str, object] = field(default_factory=dict)
+    raw_payload: object | None = None
 
     def __post_init__(self) -> None:
         if self.contract_id <= 0 or not self.source.strip() or not self.raw_response_hash.strip():
@@ -55,7 +69,10 @@ class SettlementEvidence:
             raise PaperTradingError("settlement timestamps must be timezone-aware")
         if self.retrieved_at < self.observed_at:
             raise PaperTradingError("settlement retrieval precedes observation")
-        if self.outcome_label.strip().upper() not in {"YES", "NO"}:
+        if self.outcome_label is not None and self.outcome_label.strip().upper() not in {
+            "YES",
+            "NO",
+        }:
             raise PaperTradingError("settlement outcome mapping is invalid")
 
 
@@ -105,6 +122,13 @@ async def _locked_paper_balance(session: AsyncSession, starting_balance: Decimal
             raise
         return Decimal(str(setting.value))
     return starting_balance
+
+
+async def _begin_money_write(session: AsyncSession) -> None:
+    """Acquire SQLite's process-safe writer lock before any portfolio read."""
+    bind = session.get_bind()
+    if bind.dialect.name == "sqlite":
+        await session.execute(text("BEGIN IMMEDIATE"))
 
 
 async def _set_paper_balance(
@@ -219,20 +243,75 @@ class PaperLifecycle:
         requested_shares: Decimal | None = None,
         minimum_order_size: Decimal | None = None,
         now: datetime | None = None,
+        actor: str = "system:paper",
+        request_id: str | None = None,
     ) -> dict[str, object]:
         """Risk-size and atomically persist one complete paper fill per signal."""
         captured_at = now or datetime.now(UTC)
+        if captured_at.tzinfo is None:
+            raise PaperTradingError("now_must_be_timezone_aware")
+        actor = actor.strip()
+        if not actor:
+            raise PaperTradingError("paper actor is required")
         async with self.sessions() as session:
-            existing = await session.scalar(
-                select(PaperExecutionDecision).where(PaperExecutionDecision.signal_id == signal_id)
-            )
-            if existing is not None:
-                return await self._execution_result(session, existing)
+            await _begin_money_write(session)
             signal = await session.get(Signal, signal_id)
             if signal is None:
                 raise PaperTradingError("signal not found")
             required = minimum_order_size or _required_size(signal)
             requested = requested_shares or required
+            normalized_request_id = request_id or f"paper-execute:{signal.fingerprint}"
+            request_fingerprint = _hash(
+                {
+                    "operation": "execute_paper_signal",
+                    "signal": signal.fingerprint,
+                    "requested_shares": str(requested),
+                    "minimum_order_size": str(required),
+                    "actor": actor,
+                }
+            )
+            existing = await session.scalar(
+                select(PaperExecutionDecision).where(PaperExecutionDecision.signal_id == signal_id)
+            )
+            if existing is not None:
+                _assert_request_matches(
+                    existing.request_id,
+                    existing.actor,
+                    existing.request_fingerprint,
+                    normalized_request_id,
+                    actor,
+                    request_fingerprint,
+                )
+                return await self._execution_result(session, existing)
+            reused_request = await session.scalar(
+                select(PaperExecutionDecision).where(
+                    PaperExecutionDecision.request_id == normalized_request_id
+                )
+            )
+            if reused_request is not None:
+                raise PaperIdempotencyConflict(normalized_request_id)
+
+            eligibility = await self._eligibility_reasons(session, signal, captured_at)
+            if eligibility:
+                balance = await get_paper_balance(session, self.settings.paper_starting_balance)
+                record = PaperExecutionDecision(
+                    signal_id=signal.id,
+                    request_id=normalized_request_id,
+                    actor=actor,
+                    request_fingerprint=request_fingerprint,
+                    approved=False,
+                    reasons=list(eligibility),
+                    requested_shares=requested,
+                    approved_shares=Decimal("0"),
+                    balance_before=balance,
+                    exposure_before=Decimal("0"),
+                    daily_pnl=Decimal("0"),
+                    created_at=captured_at,
+                )
+                session.add(record)
+                await session.commit()
+                return await self._execution_result(session, record)
+
             balance = await _locked_paper_balance(session, self.settings.paper_starting_balance)
             exposure = Decimal(
                 str(
@@ -276,11 +355,12 @@ class PaperLifecycle:
                     self.settings.max_daily_loss_fraction,
                 ),
                 unrealized_pnl=unrealized,
-                data_stale=signal.freshness_seconds is not None
-                and signal.freshness_seconds > self.settings.polymarket_poll_seconds * 2,
             )
             record = PaperExecutionDecision(
                 signal_id=signal.id,
+                request_id=normalized_request_id,
+                actor=actor,
+                request_fingerprint=request_fingerprint,
                 approved=decision.approved,
                 reasons=list(decision.reasons),
                 requested_shares=requested,
@@ -302,6 +382,14 @@ class PaperLifecycle:
                 )
                 if persisted is None:
                     raise
+                _assert_request_matches(
+                    persisted.request_id,
+                    persisted.actor,
+                    persisted.request_fingerprint,
+                    normalized_request_id,
+                    actor,
+                    request_fingerprint,
+                )
                 return await self._execution_result(session, persisted)
             if not decision.approved:
                 await session.commit()
@@ -377,6 +465,58 @@ class PaperLifecycle:
             await session.commit()
             return await self._execution_result(session, record)
 
+    async def _eligibility_reasons(
+        self, session: AsyncSession, signal: Signal, now: datetime
+    ) -> tuple[str, ...]:
+        reasons: list[str] = []
+        if (await ExecutionControl(session).snapshot()).paused:
+            reasons.append("execution_paused")
+        contract = (
+            await session.get(DomainContract, signal.contract_id)
+            if signal.contract_id is not None
+            else None
+        )
+        if contract is None:
+            reasons.append("contract_missing")
+        elif not contract.accepted:
+            reasons.append("contract_not_accepted")
+        elif contract.expiry is None or contract.expiry <= now:
+            reasons.append("contract_expired")
+        market_snapshot = signal.signal_data.get("market")
+        if isinstance(market_snapshot, dict):
+            if market_snapshot.get("active") is not True:
+                reasons.append("market_inactive")
+            if market_snapshot.get("closed") is not False:
+                reasons.append("market_closed")
+        elif signal.market_id is not None:
+            market = await session.get(Market, signal.market_id)
+            if market is None or not market.active:
+                reasons.append("market_inactive")
+            if market is None or market.closed:
+                reasons.append("market_closed")
+        else:
+            reasons.append("market_snapshot_missing")
+
+        signal_age = max(0, int((now - signal.generated_at).total_seconds()))
+        signal_freshness = signal.freshness_seconds or 0
+        if signal_freshness + signal_age > self.settings.polymarket_poll_seconds * 2:
+            reasons.append("signal_stale")
+        evidence = (
+            await session.get(EvidenceSnapshot, signal.evidence_snapshot_id)
+            if signal.evidence_snapshot_id is not None
+            else None
+        )
+        if evidence is None and (contract is None or contract.domain != "weather"):
+            reasons.append("evidence_missing")
+        elif evidence is not None:
+            raw_limit = evidence.normalized_values.get("freshness_limit_seconds", 7200)
+            limit = int(raw_limit) if isinstance(raw_limit, (int, str)) else 7200
+            source_age = evidence.freshness_seconds or 0
+            retrieval_age = max(0, int((now - evidence.retrieved_at).total_seconds()))
+            if source_age + retrieval_age > limit:
+                reasons.append("evidence_stale")
+        return tuple(dict.fromkeys(reasons))
+
     async def _execution_result(
         self, session: AsyncSession, decision: PaperExecutionDecision
     ) -> dict[str, object]:
@@ -421,17 +561,62 @@ class PaperLifecycle:
             }
 
     async def settle_position(
-        self, position_id: int, evidence: SettlementEvidence
+        self,
+        position_id: int,
+        evidence: SettlementEvidence,
+        *,
+        actor: str = "system:settlement",
+        request_id: str | None = None,
     ) -> dict[str, object]:
         """Settle once from already-fetched authoritative evidence."""
+        actor = actor.strip()
+        if not actor:
+            raise PaperTradingError("settlement actor is required")
         async with self.sessions() as session:
+            await _begin_money_write(session)
+            position = await session.get(PaperPosition, position_id)
+            if position is None:
+                raise PaperTradingError("paper position is not open")
             existing = await session.scalar(
                 select(PaperSettlement).where(PaperSettlement.position_id == position_id)
             )
+            normalized_request_id = request_id or f"paper-settle:{position_id}"
+            request_fingerprint = _hash(
+                {
+                    "operation": "settle_paper_position",
+                    "position_id": position_id,
+                    "actor": actor,
+                    "contract_id": evidence.contract_id,
+                    "source": evidence.source.strip().lower(),
+                    "observed_at": evidence.observed_at.isoformat(),
+                    "retrieved_at": evidence.retrieved_at.isoformat(),
+                    "raw_response_hash": evidence.raw_response_hash,
+                    "normalized_values": evidence.normalized_values,
+                    "claimed_outcome": evidence.outcome_label,
+                }
+            )
             if existing is not None:
+                if (
+                    existing.request_id is None
+                    and existing.actor is None
+                    and existing.request_fingerprint is None
+                ):
+                    return _settlement_result(existing)
+                _assert_request_matches(
+                    existing.request_id,
+                    existing.actor,
+                    existing.request_fingerprint,
+                    normalized_request_id,
+                    actor,
+                    request_fingerprint,
+                )
                 return _settlement_result(existing)
-            position = await session.get(PaperPosition, position_id)
-            if position is None or position.status != "open":
+            reused_request = await session.scalar(
+                select(PaperSettlement).where(PaperSettlement.request_id == normalized_request_id)
+            )
+            if reused_request is not None:
+                raise PaperIdempotencyConflict(normalized_request_id)
+            if position.status != "open":
                 raise PaperTradingError("paper position is not open")
             signal = await session.get(Signal, position.signal_id)
             if signal is None or signal.contract_id is None:
@@ -439,15 +624,15 @@ class PaperLifecycle:
             contract = await session.get(DomainContract, signal.contract_id)
             if contract is None or not contract.accepted:
                 raise PaperTradingError("paper position contract is not accepted")
-            _validate_settlement(contract, signal, evidence)
+            outcome = _derive_settlement_outcome(contract, signal, evidence)
             evidence_fingerprint = _hash(
                 {
                     "kind": "settlement-evidence-v1",
                     "contract": contract.fingerprint,
                     "source": evidence.source,
                     "observed_at": evidence.observed_at.isoformat(),
-                    "outcome": evidence.outcome_label.upper(),
                     "raw": evidence.raw_response_hash,
+                    "normalized_values": evidence.normalized_values,
                 }
             )
             snapshot = await session.scalar(
@@ -464,7 +649,7 @@ class PaperLifecycle:
                     raw_response_hash=evidence.raw_response_hash,
                     normalized_values={
                         **evidence.normalized_values,
-                        "outcome_label": evidence.outcome_label.upper(),
+                        "outcome_label": outcome,
                         "evidence_role": "authoritative_settlement",
                     },
                     quality_flags=list(evidence.quality_flags),
@@ -475,7 +660,6 @@ class PaperLifecycle:
                 )
                 session.add(snapshot)
                 await session.flush()
-            outcome = evidence.outcome_label.upper()
             won = (signal.outcome_label or "").upper() == outcome
             payout = position.shares if won else Decimal("0")
             realized = payout - position.amount
@@ -484,6 +668,9 @@ class PaperLifecycle:
             settlement = PaperSettlement(
                 position_id=position.id,
                 evidence_snapshot_id=snapshot.id,
+                request_id=normalized_request_id,
+                actor=actor,
+                request_fingerprint=request_fingerprint,
                 outcome_label=outcome,
                 settled_at=evidence.retrieved_at,
                 won=won,
@@ -538,6 +725,14 @@ class PaperLifecycle:
                 )
                 if replay is None:
                     raise
+                _assert_request_matches(
+                    replay.request_id,
+                    replay.actor,
+                    replay.request_fingerprint,
+                    normalized_request_id,
+                    actor,
+                    request_fingerprint,
+                )
                 return _settlement_result(replay)
             return _settlement_result(settlement)
 
@@ -577,7 +772,14 @@ class SettlementWorker:
         for position_id in due:
             try:
                 evidence = await fetch(position_id)
-                results.append(await self.lifecycle.settle_position(position_id, evidence))
+                results.append(
+                    await self.lifecycle.settle_position(
+                        position_id,
+                        evidence,
+                        actor="system:settlement_scheduler",
+                        request_id=f"scheduled-settlement:{position_id}",
+                    )
+                )
             except Exception as exc:  # each position is an independent polling unit
                 results.append(
                     {
@@ -602,9 +804,9 @@ def _required_size(signal: Signal) -> Decimal:
     return required
 
 
-def _validate_settlement(
+def _derive_settlement_outcome(
     contract: DomainContract, signal: Signal, evidence: SettlementEvidence
-) -> None:
+) -> str:
     if evidence.contract_id != contract.id:
         raise PaperTradingError("settlement contract mismatch")
     if (
@@ -612,10 +814,68 @@ def _validate_settlement(
         or evidence.source.strip().lower() != str(contract.resolution_source).strip().lower()
     ):
         raise PaperTradingError("settlement source mismatch")
-    if contract.expiry is None or evidence.observed_at < contract.expiry:
-        raise PaperTradingError("settlement evidence precedes contract expiry")
+    if contract.expiry is None or evidence.observed_at != contract.expiry:
+        raise PaperTradingError("settlement observation timestamp mismatch")
     if (signal.outcome_label or "").upper() not in {"YES", "NO"}:
         raise PaperTradingError("signal outcome mapping is invalid")
+    if contract.domain != "crypto":
+        raise PaperTradingError(f"settlement domain unsupported: {contract.domain}")
+    data = contract.contract_data
+    values = evidence.normalized_values
+    if values.get("asset") != data.get("asset") or values.get("quote") != data.get("quote"):
+        raise PaperTradingError("settlement asset or quote mismatch")
+    if values.get("price_definition") != data.get("price_definition"):
+        raise PaperTradingError("settlement price definition mismatch")
+    if (
+        evidence.raw_payload is not None
+        and _hash(evidence.raw_payload) != evidence.raw_response_hash
+    ):
+        raise PaperTradingError("settlement raw payload hash mismatch")
+    try:
+        price = Decimal(str(values["price"]))
+        increment = Decimal(str(data["rounding_increment"]))
+    except (KeyError, InvalidOperation, TypeError, ValueError) as exc:
+        raise PaperTradingError("settlement price is invalid") from exc
+    if not price.is_finite() or price <= 0 or increment <= 0:
+        raise PaperTradingError("settlement price is invalid")
+    if data.get("rounding_mode") != "half_up":
+        raise PaperTradingError("settlement rounding mode unsupported")
+    rounded = (price / increment).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * increment
+    comparison = data.get("comparison")
+    inclusive = data.get("comparison_inclusive") is True
+    reference = data.get("threshold")
+    if comparison in {"up", "down"}:
+        reference = data.get("comparison_reference_price")
+    try:
+        boundary = Decimal(str(reference))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise PaperTradingError("settlement comparison reference is invalid") from exc
+    if comparison in {"above", "up"}:
+        resolved_yes = rounded >= boundary if inclusive else rounded > boundary
+    elif comparison in {"below", "down"}:
+        resolved_yes = rounded <= boundary if inclusive else rounded < boundary
+    else:
+        raise PaperTradingError("settlement comparison unsupported")
+    outcome = "YES" if resolved_yes else "NO"
+    if evidence.outcome_label is not None and evidence.outcome_label.strip().upper() != outcome:
+        raise PaperTradingError("settlement claimed outcome conflicts with observation")
+    return outcome
+
+
+def _assert_request_matches(
+    stored_request_id: str | None,
+    stored_actor: str | None,
+    stored_fingerprint: str | None,
+    request_id: str,
+    actor: str,
+    fingerprint: str,
+) -> None:
+    if (
+        stored_request_id != request_id
+        or stored_actor != actor
+        or stored_fingerprint != fingerprint
+    ):
+        raise PaperIdempotencyConflict(request_id)
 
 
 def _settlement_result(settlement: PaperSettlement) -> dict[str, object]:
@@ -625,8 +885,8 @@ def _settlement_result(settlement: PaperSettlement) -> dict[str, object]:
         "status": "settled",
         "outcome": settlement.outcome_label,
         "won": settlement.won,
-        "payout": str(settlement.payout),
-        "realized_pnl": str(settlement.realized_pnl),
+        "payout": _money(settlement.payout),
+        "realized_pnl": _money(settlement.realized_pnl),
     }
 
 
@@ -634,3 +894,7 @@ def _hash(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     ).hexdigest()
+
+
+def _money(value: Decimal) -> str:
+    return format(value.quantize(Decimal("0.00000001")), "f")

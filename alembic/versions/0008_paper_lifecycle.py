@@ -71,6 +71,9 @@ def upgrade() -> None:
     with op.batch_alter_table("paper_settlements") as batch_op:
         batch_op.add_column(sa.Column("evidence_snapshot_id", sa.Integer(), nullable=True))
         batch_op.add_column(sa.Column("outcome_label", sa.String(16), nullable=True))
+        batch_op.add_column(sa.Column("request_id", sa.String(120), nullable=True))
+        batch_op.add_column(sa.Column("actor", sa.String(120), nullable=True))
+        batch_op.add_column(sa.Column("request_fingerprint", sa.String(128), nullable=True))
         batch_op.create_foreign_key(
             "fk_paper_settlements_evidence_snapshot_id_evidence_snapshots",
             "evidence_snapshots",
@@ -78,9 +81,7 @@ def upgrade() -> None:
             ["id"],
             ondelete="RESTRICT",
         )
-        batch_op.create_unique_constraint(
-            "uq_paper_settlements_evidence_snapshot_id", ["evidence_snapshot_id"]
-        )
+        batch_op.create_unique_constraint("uq_paper_settlements_request_id", ["request_id"])
         batch_op.create_check_constraint("ck_paper_settlement_payout", "payout >= 0")
 
     with op.batch_alter_table("calibration_metrics") as batch_op:
@@ -98,6 +99,9 @@ def upgrade() -> None:
         "paper_execution_decisions",
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("signal_id", sa.Integer(), nullable=False),
+        sa.Column("request_id", sa.String(120), nullable=True),
+        sa.Column("actor", sa.String(120), nullable=True),
+        sa.Column("request_fingerprint", sa.String(128), nullable=True),
         sa.Column("approved", sa.Boolean(), nullable=False),
         sa.Column("reasons", sa.JSON(), nullable=False),
         sa.Column("requested_shares", sa.Numeric(18, 8), nullable=False),
@@ -109,17 +113,62 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["signal_id"], ["signals.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("signal_id"),
+        sa.UniqueConstraint("request_id"),
     )
 
 
 def downgrade() -> None:
+    # 0007 cannot represent crypto paper rows because its positions require legacy
+    # weather market/outcome foreign keys. Remove only those unrepresentable lifecycle
+    # rows before restoring NOT NULL; signals/evidence/predictions remain intact.
+    connection = op.get_bind()
+    connection.execute(
+        sa.text(
+            "DELETE FROM calibration_metrics WHERE settlement_id IN "
+            "(SELECT ps.id FROM paper_settlements ps JOIN paper_positions pp "
+            "ON pp.id = ps.position_id WHERE pp.market_id IS NULL OR pp.outcome_id IS NULL)"
+        )
+    )
+    connection.execute(
+        sa.text(
+            "DELETE FROM paper_settlements WHERE position_id IN "
+            "(SELECT id FROM paper_positions WHERE market_id IS NULL OR outcome_id IS NULL)"
+        )
+    )
+    connection.execute(
+        sa.text(
+            "DELETE FROM execution_fills WHERE execution_order_id IN "
+            "(SELECT execution_order_id FROM paper_positions "
+            "WHERE market_id IS NULL OR outcome_id IS NULL)"
+        )
+    )
+    connection.execute(
+        sa.text(
+            "DELETE FROM paper_execution_decisions WHERE signal_id IN "
+            "(SELECT signal_id FROM paper_positions "
+            "WHERE market_id IS NULL OR outcome_id IS NULL)"
+        )
+    )
+    connection.execute(
+        sa.text("DELETE FROM paper_positions WHERE market_id IS NULL OR outcome_id IS NULL")
+    )
+    connection.execute(
+        sa.text(
+            "DELETE FROM execution_orders WHERE id IN "
+            "(SELECT eo.id FROM execution_orders eo JOIN signals s ON s.id = eo.signal_id "
+            "WHERE eo.mode = 'paper' AND (s.market_id IS NULL OR s.outcome_id IS NULL))"
+        )
+    )
     op.drop_table("paper_execution_decisions")
     with op.batch_alter_table("calibration_metrics") as batch_op:
         batch_op.drop_constraint("uq_calibration_metrics_settlement_id", type_="unique")
         batch_op.drop_column("settlement_id")
     with op.batch_alter_table("paper_settlements") as batch_op:
         batch_op.drop_constraint("ck_paper_settlement_payout", type_="check")
-        batch_op.drop_constraint("uq_paper_settlements_evidence_snapshot_id", type_="unique")
+        batch_op.drop_constraint("uq_paper_settlements_request_id", type_="unique")
+        batch_op.drop_column("request_fingerprint")
+        batch_op.drop_column("actor")
+        batch_op.drop_column("request_id")
         batch_op.drop_column("outcome_label")
         batch_op.drop_column("evidence_snapshot_id")
     with op.batch_alter_table("paper_positions") as batch_op:

@@ -494,7 +494,11 @@ class CryptoPaperPipeline:
             else:
                 signal_id = existing.id
                 await session.rollback()
-        paper = await PaperLifecycle(self.sessions, self.settings).execute_signal(signal_id)
+        paper = await PaperLifecycle(self.sessions, self.settings).execute_signal(
+            signal_id,
+            actor="system:crypto_pipeline",
+            request_id=f"crypto-paper:{fingerprint}",
+        )
         return {
             "market_id": market.market_id,
             "status": "accepted",
@@ -832,6 +836,7 @@ def _evidence_values(
         "asset": contract.asset,
         "quote": contract.quote,
         "interval_seconds": series.interval_seconds,
+        "freshness_limit_seconds": 7200,
         "candles": [
             {"timestamp": candle.timestamp.isoformat(), "close": str(candle.close)}
             for candle in series.candles

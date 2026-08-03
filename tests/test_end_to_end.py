@@ -12,6 +12,7 @@ from app.database import make_engine, make_session_factory
 from app.models import (
     Base,
     Event,
+    ExecutionControlState,
     ForecastMember,
     ForecastRun,
     Market,
@@ -112,11 +113,25 @@ async def test_recorded_london_market_runs_end_to_end_without_duplicate_alerts(
         slippage_buffer=Decimal("0.01"),
         uncertainty_buffer=Decimal("0.04"),
         rule_risk_buffer=Decimal("0.02"),
+        paper_starting_balance=Decimal("100"),
     )
     engine = make_engine(database_url)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     sessions = make_session_factory(engine)
+    async with sessions() as session:
+        session.add(
+            ExecutionControlState(
+                id=1,
+                paused=False,
+                revision=0,
+                request_id="weather-test",
+                actor="test",
+                reason="test entries allowed",
+                updated_at=retrieved_at,
+            )
+        )
+        await session.commit()
     telegram = RecordingTelegram()
     stations: dict[str, Station] = load_station_registry(Path("config/stations.yaml"))
 

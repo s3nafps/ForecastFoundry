@@ -38,8 +38,9 @@ from app.schemas import (
     SignalPolicy,
     Station,
 )
+from app.services.contracts import persist_domain_contract
 from app.services.forecast import ForecastProvider
-from app.services.paper import PaperTradingError, get_paper_balance, open_paper_position
+from app.services.paper import PaperLifecycle, get_paper_balance
 from app.services.probability import calculate_probabilities, daily_maximum
 from app.services.rules import RuleNormalizationError, normalize_temperature_event
 from app.services.signals import evaluate_signal
@@ -306,6 +307,14 @@ async def scan_once(
             )
 
             for market, yes, source_market in markets.values():
+                contract_input = MarketInput(
+                    market_id=source_market.id,
+                    title=source_market.question,
+                    description=source_event.description,
+                    raw_data={"event": source_event.model_dump(mode="json")},
+                )
+                contract_route = registry.route(contract_input)
+                contract = await persist_domain_contract(session, contract_input, contract_route)
                 book = books_by_asset.get(yes.token_id)
                 if book:
                     session.add(
@@ -442,6 +451,7 @@ async def scan_once(
                 signal = Signal(
                     market_id=market.id,
                     outcome_id=yes.id,
+                    contract_id=contract.id,
                     generated_at=now,
                     model_probability=probability,
                     executable_ask=book.best_ask,
@@ -454,29 +464,18 @@ async def scan_once(
                         "rule_risk": str(buffers.rule_risk),
                     },
                     fingerprint=fingerprint,
-                    signal_data={"event_id": source_event.id},
+                    freshness_seconds=0,
+                    signal_data={
+                        "event_id": source_event.id,
+                        "candidate": {"required_size": str(book.minimum_order_size)},
+                        "market": {
+                            "active": source_market.active,
+                            "closed": source_market.closed,
+                        },
+                    },
                 )
                 session.add(signal)
                 await session.flush()
-                try:
-                    await open_paper_position(
-                        session,
-                        signal=signal,
-                        shares=book.minimum_order_size,
-                        minimum_order_size=book.minimum_order_size,
-                        starting_balance=settings.paper_starting_balance,
-                        fee_rate=settings.estimated_fee,
-                        slippage=settings.slippage_buffer,
-                    )
-                except PaperTradingError as exc:
-                    session.add(
-                        RejectedSignal(
-                            market_id=market.id,
-                            generated_at=now,
-                            reasons=["paper_entry_rejected"],
-                            candidate_data={"error": str(exc)},
-                        )
-                    )
 
                 model_counts = {
                     forecast.model.upper(): (
@@ -507,6 +506,12 @@ async def scan_once(
                     generated_at=now,
                 )
                 await session.commit()
+                await PaperLifecycle(sessions, settings).execute_signal(
+                    signal.id,
+                    actor="system:weather_worker",
+                    request_id=f"weather-paper:{fingerprint}",
+                    now=now,
+                )
                 if telegram and await telegram.send_signal(alert):
                     signal.alerted_at = now
                     await session.commit()

@@ -31,7 +31,6 @@ from app.services.execution_control import ControlSnapshot, ExecutionControl
 from app.services.operator_auth import OperatorAuth, OperatorAuthError
 from app.services.paper import (
     PaperLifecycle,
-    SettlementEvidence,
     SettlementFetcher,
     SettlementWorker,
 )
@@ -218,7 +217,13 @@ class ApplicationServices:
             orders = (
                 await session.scalars(select(ExecutionOrder).where(ExecutionOrder.mode == "paper"))
             ).all()
-            fills = (await session.scalars(select(ExecutionFill))).all()
+            fills = (
+                await session.scalars(
+                    select(ExecutionFill)
+                    .join(ExecutionOrder, ExecutionOrder.id == ExecutionFill.execution_order_id)
+                    .where(ExecutionOrder.mode == "paper")
+                )
+            ).all()
             calibrations = (await session.scalars(select(CalibrationMetric))).all()
         realized = sum((row.realized_pnl for row in settlements), start=0)
         unrealized = sum((row.unrealized_pnl for row in positions if row.status == "open"), start=0)
@@ -254,36 +259,6 @@ class ApplicationServices:
                 for row in positions
             ],
         }
-
-    async def execute_paper_signal(self, signal_id: int) -> dict[str, object]:
-        return await PaperLifecycle(self.sessions, self.settings).execute_signal(signal_id)
-
-    async def settle_paper_position(
-        self, position_id: int, evidence: SettlementEvidence | dict[str, object]
-    ) -> dict[str, object]:
-        normalized = (
-            evidence
-            if isinstance(evidence, SettlementEvidence)
-            else SettlementEvidence(
-                contract_id=_as_int_required(evidence["contract_id"]),
-                source=str(evidence["source"]),
-                observed_at=_as_datetime(evidence["observed_at"]),
-                retrieved_at=_as_datetime(evidence["retrieved_at"]),
-                outcome_label=str(evidence["outcome_label"]),
-                raw_response_hash=str(evidence["raw_response_hash"]),
-                normalized_values=_as_mapping(evidence.get("normalized_values", {})),
-                provider_version=(
-                    str(evidence["provider_version"])
-                    if evidence.get("provider_version") is not None
-                    else None
-                ),
-                quality_flags=_as_strings(evidence.get("quality_flags", ())),
-                license_metadata=_as_mapping(evidence.get("license_metadata", {})),
-            )
-        )
-        return await PaperLifecycle(self.sessions, self.settings).settle_position(
-            position_id, normalized
-        )
 
     async def run_settlement_job(
         self, fetcher: SettlementFetcher | None, *, now: datetime | None = None
@@ -384,31 +359,3 @@ def _as_int(value: str) -> int:
 
 def _dataset_exists(dataset: str) -> bool:
     return Path(dataset).is_file()
-
-
-def _as_datetime(value: object) -> datetime:
-    if isinstance(value, datetime):
-        parsed = value
-    else:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        raise ApplicationServiceError("settlement timestamps must be timezone-aware")
-    return parsed
-
-
-def _as_int_required(value: object) -> int:
-    if not isinstance(value, (str, int)):
-        raise ApplicationServiceError("settlement contract_id is invalid")
-    return int(value)
-
-
-def _as_mapping(value: object) -> dict[str, object]:
-    if not isinstance(value, dict):
-        raise ApplicationServiceError("settlement metadata must be an object")
-    return {str(key): item for key, item in value.items()}
-
-
-def _as_strings(value: object) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)):
-        raise ApplicationServiceError("settlement quality_flags must be an array")
-    return tuple(str(item) for item in value)

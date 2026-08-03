@@ -324,8 +324,11 @@ class PaperSettlement(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     position_id: Mapped[int] = mapped_column(ForeignKey("paper_positions.id"), unique=True)
     evidence_snapshot_id: Mapped[int | None] = mapped_column(
-        ForeignKey("evidence_snapshots.id", ondelete="RESTRICT"), unique=True
+        ForeignKey("evidence_snapshots.id", ondelete="RESTRICT")
     )
+    request_id: Mapped[str | None] = mapped_column(String(120), unique=True)
+    actor: Mapped[str | None] = mapped_column(String(120))
+    request_fingerprint: Mapped[str | None] = mapped_column(String(128))
     outcome_label: Mapped[str | None] = mapped_column(String(16))
     settled_at: Mapped[datetime] = mapped_column(UTCDateTime())
     won: Mapped[bool] = mapped_column(Boolean)
@@ -344,6 +347,9 @@ class PaperExecutionDecision(Base):
     signal_id: Mapped[int] = mapped_column(
         ForeignKey("signals.id", ondelete="CASCADE"), unique=True
     )
+    request_id: Mapped[str | None] = mapped_column(String(120), unique=True)
+    actor: Mapped[str | None] = mapped_column(String(120))
+    request_fingerprint: Mapped[str | None] = mapped_column(String(128))
     approved: Mapped[bool] = mapped_column(Boolean)
     reasons: Mapped[list[str]] = mapped_column(JSON)
     requested_shares: Mapped[Decimal] = mapped_column(Numeric(18, 8))

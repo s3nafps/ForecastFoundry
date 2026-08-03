@@ -19,6 +19,7 @@ from app.models import (
     CalibrationMetric,
     DomainContract,
     EvidenceSnapshot,
+    ExecutionControlState,
     ExecutionFill,
     ExecutionOrder,
     PaperExecutionDecision,
@@ -208,11 +209,25 @@ async def _pipeline(
     engine = make_engine(database_url)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+    sessions = make_session_factory(engine)
+    async with sessions() as session:
+        session.add(
+            ExecutionControlState(
+                id=1,
+                paused=False,
+                revision=0,
+                request_id="crypto-test",
+                actor="test",
+                reason="test entries allowed",
+                updated_at=NOW,
+            )
+        )
+        await session.commit()
     pricing = FixtureBooks(
         books or tuple(OrderBook.model_validate(book) for book in FIXTURE["books"])
     )
     pipeline = CryptoPaperPipeline(
-        make_session_factory(engine),
+        sessions,
         data or FixtureCryptoData(),
         pricing=pricing,
         settings=_settings(database_url),
@@ -295,7 +310,12 @@ async def test_btc_fixture_runs_through_settlement_and_calibration(tmp_path: Pat
             retrieved_at=expiry + timedelta(minutes=1),
             outcome_label="YES",
             raw_response_hash="btc-resolution-fixture",
-            normalized_values={"close": "101", "threshold": "90"},
+            normalized_values={
+                "asset": "BTC",
+                "quote": "USD",
+                "price": "101",
+                "price_definition": "closing price",
+            },
             provider_version="coinbase-fixture-v1",
         ),
     )
