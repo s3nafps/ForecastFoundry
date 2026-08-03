@@ -4,6 +4,7 @@ services:
   app:
     build: .
     restart: unless-stopped
+    user: forecastfoundry
     env_file:
       - path: .env
         required: false
@@ -24,6 +25,26 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  mcp:
+    build: .
+    restart: unless-stopped
+    user: forecastfoundry
+    environment:
+      APP_ENV: production
+      EXECUTION_ENABLED: "false"
+      HERMES_MCP_ENABLED: "true"
+    entrypoint: ["/app/docker/mcp-entrypoint.sh"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import app.mcp_server"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
 volumes:
   weatheredge-data:

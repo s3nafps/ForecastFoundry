@@ -21,7 +21,10 @@ RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels forecas
 COPY alembic.ini ./
 COPY alembic ./alembic
 COPY config ./config
+COPY docker ./docker
+RUN chmod 0555 /app/docker/*.sh
 
 USER forecastfoundry
 EXPOSE 8000
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+ENTRYPOINT ["/app/docker/executor-entrypoint.sh"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
