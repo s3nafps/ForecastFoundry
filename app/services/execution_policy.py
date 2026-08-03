@@ -3,6 +3,8 @@ from pathlib import Path
 
 from app.config import Settings
 from app.services.keystore import KeystoreError, validate_encrypted_keystore
+from app.services.kill_switch import KillSwitch, KillSwitchError
+from app.services.risk import RiskDecision
 
 
 class ExecutionSafetyError(ValueError):
@@ -36,3 +38,23 @@ def assert_startup_safe(settings: Settings) -> None:
         validate_encrypted_keystore(path)
     except KeystoreError as exc:
         raise ExecutionSafetyError(str(exc)) from exc
+
+
+def assert_live_order_allowed(
+    settings: Settings,
+    *,
+    kill_switch: KillSwitch,
+    geoblock_allowed: bool,
+    risk: RiskDecision,
+) -> None:
+    assert_startup_safe(settings)
+    if not settings.execution_enabled:
+        raise ExecutionSafetyError("live execution is disabled")
+    if not geoblock_allowed:
+        raise ExecutionSafetyError("geoblock check did not allow execution")
+    try:
+        kill_switch.assert_clear()
+    except KillSwitchError as exc:
+        raise ExecutionSafetyError(str(exc)) from exc
+    if not risk.approved:
+        raise ExecutionSafetyError(f"risk policy rejected order: {', '.join(risk.reasons)}")

@@ -3,8 +3,14 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings
-from app.services.execution_policy import ExecutionSafetyError, assert_startup_safe
+from app.services.execution_policy import (
+    ExecutionSafetyError,
+    assert_live_order_allowed,
+    assert_startup_safe,
+)
 from app.services.keystore import encrypt_keystore
+from app.services.kill_switch import KillSwitch
+from app.services.risk import RiskDecision
 
 
 def live_settings(path: Path) -> Settings:
@@ -29,3 +35,18 @@ def test_live_mode_accepts_a_strict_keystore_file(tmp_path: Path) -> None:
     encrypt_keystore(keystore, "password", {"private_key": "0xprivate"})
 
     assert_startup_safe(live_settings(keystore))
+
+
+def test_live_order_preflight_requires_geoblock_kill_switch_and_risk(tmp_path: Path) -> None:
+    keystore = tmp_path / "bot.json"
+    encrypt_keystore(keystore, "password", {"private_key": "0xprivate"})
+    settings = live_settings(keystore)
+    decision = RiskDecision(True, shares=1, notional=1)
+    switch = KillSwitch(active=False, reason="")
+
+    assert_live_order_allowed(settings, kill_switch=switch, geoblock_allowed=True, risk=decision)
+
+    with pytest.raises(ExecutionSafetyError, match="geoblock"):
+        assert_live_order_allowed(
+            settings, kill_switch=switch, geoblock_allowed=False, risk=decision
+        )
