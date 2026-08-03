@@ -5,6 +5,9 @@
         "command": "forecastfoundry",
         "args": ["mcp"],
         "enabled": true,
+        "env": {
+          "EXECUTION_ENABLED": "false"
+        },
         "toolFilter": {
           "include": [
             "list_supported_domains",
