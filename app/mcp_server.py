@@ -106,7 +106,9 @@ def create_server() -> MCPServer:
 
 
 async def invoke_tool(server: MCPServer, name: str, arguments: dict[str, Any]) -> dict[str, object]:
-    handlers = server._forecastfoundry_handlers  # type: ignore[attr-defined]
+    handlers: dict[str, Callable[..., Awaitable[dict[str, object]]]] = (
+        server._forecastfoundry_handlers  # type: ignore[attr-defined]
+    )
     if name not in handlers:
         raise ValueError(f"unsupported MCP tool: {name}")
     return await handlers[name](**arguments)

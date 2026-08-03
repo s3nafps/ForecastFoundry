@@ -1,23 +1,19 @@
-# WeatherEdge
+# ForecastFoundry
 
-WeatherEdge is a paper-only intelligence service for active Polymarket daily maximum-temperature bucket markets. It discovers public markets, reads executable CLOB asks, turns Open-Meteo ensemble members into deterministic bucket probabilities, filters usable edge, records a $5 paper ledger, and can send Telegram alerts.
+ForecastFoundry is an open-source, paper-first prediction-market research and execution engine. Weather is the first domain; BTC/ETH threshold and up/down contracts are supported through strict, source-aware contracts. The same local services work standalone or through the CLI, REST/OpenAPI, OpenClaw, Codex CLI, Claude Code, and Hermes-compatible MCP clients.
 
-> **No real trading.** WeatherEdge v1 contains no wallet, private key, signing, order-placement, deposit, or withdrawal code. `REAL_TRADING_ENABLED=true` is rejected at startup. Forecast probability is an estimate, not truth or financial advice.
+Forecasts and probabilities are estimates, not financial advice or guarantees. ForecastFoundry does not promise returns, pool capital, or take custody of customer funds. Paper mode is the default and `EXECUTION_ENABLED=false` is required unless an operator deliberately completes every live gate.
 
-## Architecture and data
+## Interfaces
 
-One FastAPI process serves the JSON API and escaped HTML dashboard, runs APScheduler polling jobs, and stores source and derived records in SQLite through async SQLAlchemy/Alembic. Polling is authoritative; an optional public Polymarket WebSocket only refreshes books sooner.
+- `forecastfoundry scan|backtest|status|reconcile|pause|mcp`: stable local CLI commands.
+- `http://127.0.0.1:8000`: read-only dashboard and `/api/v1` status, evidence, reconciliation, and operator controls.
+- `forecastfoundry mcp`: one restricted MCP server for research, status, reconciliation, and audited pause/resume. It exposes no signer, wallet transfer, arbitrary HTTP, or risk-limit mutation tool.
+- `integrations/` contains equivalent OpenClaw, Codex CLI, Claude Code, and Hermes configuration examples. They contain no wallet or provider secrets.
 
-- Polymarket Gamma: public event discovery and original rules.
-- Polymarket CLOB: public executable bids, asks, depth, tick size, and minimum order size.
-- Open-Meteo Ensemble API: individual ensemble-member temperature series.
-- Audited station registry: `config/stations.yaml`; initial coverage is London City Airport (`EGLC`).
+## Quick start
 
-The dashboard is at `/`; read-only JSON resources are under `/api/v1`. `/health` proves the process is alive and `/ready` verifies database access.
-
-## Local installation
-
-Python 3.12 or newer is required.
+Python 3.12+ is required.
 
 ```powershell
 python -m venv .venv
@@ -25,95 +21,24 @@ python -m venv .venv
 python -m pip install -e ".[dev]"
 Copy-Item .env.example .env
 alembic upgrade head
+forecastfoundry status --json
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-On Linux/macOS, activate with `source .venv/bin/activate` and copy with `cp .env.example .env`.
+Run `python -m pytest -q` and `python -m ruff check .` before deployment. Docker Compose keeps the HTTP service on loopback, stores the legacy `weatheredge.db` path for compatibility, and runs the MCP service without the executor `.env` or `/data` volume.
 
-Run quality checks with:
+## Providers and data
 
-```powershell
-python -m pytest -q
-python -m ruff check .
-python -m ruff format --check .
-python -m mypy app
-```
+Keyless public providers include Open-Meteo, NWS, AviationWeather, MET Norway, Coinbase, Binance, and Kraken. WeatherAPI, Visual Crossing, Tomorrow.io, OpenWeather, Reddit, X, and GitHub are optional user-supplied integrations; keys are never discovered or generated. Research features remain feature-only until a versioned walk-forward test proves improvement over the deterministic baseline.
 
-## Configuration
+Every accepted contract records its named resolution source, quote/units, UTC expiry, price definition, rounding, provenance, and original rules. Missing or conflicting terms are rejected with machine-readable reasons. Evidence stores provider metadata, timestamps, hashes, freshness, quality flags, and attribution.
 
-Settings are read from environment variables or `.env`; see `.env.example`. The important controls are polling intervals, rule confidence, minimum ensemble members, edge/spread/liquidity filters, buffers, paper balance, forecast models, and the optional WebSocket flag. Keep `REAL_TRADING_ENABLED=false`.
+## Live execution checklist
 
-To enable Telegram alerts:
+Live execution is intentionally separate from MCP and dashboard processes. It requires explicit settings, an absolute encrypted AES-GCM keystore, closed-only mode, geoblock approval, an active kill-switch cleared by an operator, risk caps, and order reconciliation. The official Polymarket SDK is an optional `forecastfoundry[live]` dependency. Review jurisdiction, Polymarket terms, source licenses, and the operator checklist before using real funds.
 
-1. Message `@BotFather` in Telegram, create a bot, and place its token in `TELEGRAM_BOT_TOKEN`.
-2. Send the new bot a message. Request `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy your numeric chat ID into `TELEGRAM_ADMIN_USER_ID`.
-3. Protect `.env`; it is ignored by Git and excluded from container builds.
+## Open core and paid services
 
-Without both Telegram values, scanning and paper positions continue but no alert is sent.
+The community edition includes contracts, providers, deterministic models, calibration, paper ledger, risk/reconciliation code, CLI, REST, MCP, Docker, tests, and fixtures under Apache-2.0. Optional paid services can provide managed deployment, backups, monitoring, tenant controls, licensed premium data, audit exports, support/SLA, and commercial embedding licenses. Safety-critical risk and execution code remains auditable in the community edition.
 
-## Docker and VPS deployment
-
-Install Docker Engine with the Compose plugin, clone the repository, then:
-
-```bash
-cp .env.example .env
-docker compose config
-docker build -t weatheredge:test .
-docker compose up -d --build
-docker compose ps
-curl --fail http://127.0.0.1:8000/health
-curl --fail http://127.0.0.1:8000/ready
-```
-
-Compose publishes only the HTTP service on loopback, mounts the named `weatheredge-data` volume at `/data`, runs `alembic upgrade head` before Uvicorn, uses the unprivileged `weatheredge` user, checks `/health`, and restarts unless stopped.
-
-For public access, install Nginx and a TLS certificate, replace the example hostname in `docs/reverse-proxy.conf`, copy it into `/etc/nginx/sites-enabled/`, test with `nginx -t`, then reload Nginx. Keep port 8000 bound to loopback; expose only Nginx ports 80/443 through the firewall.
-
-View logs and upgrade with:
-
-```bash
-docker compose logs -f --tail=200 app
-git pull --ff-only
-docker compose build --pull
-docker compose up -d
-```
-
-Stop the service without deleting its volume using `docker compose down`.
-
-## Backup and restore
-
-Stop the app before copying SQLite. The Compose project name fixes the volume name as `weatheredge_weatheredge-data`.
-
-```bash
-docker compose stop app
-docker run --rm -v weatheredge_weatheredge-data:/data -v "$PWD:/backup" alpine \
-  tar czf /backup/weatheredge-backup.tgz -C /data .
-docker compose start app
-```
-
-Restore only after retaining the current volume as a rollback copy:
-
-```bash
-docker compose down
-docker volume create weatheredge_rollback-data
-docker run --rm -v weatheredge_weatheredge-data:/source -v weatheredge_rollback-data:/target alpine \
-  sh -c 'cp -a /source/. /target/'
-docker volume rm weatheredge_weatheredge-data
-docker volume create weatheredge_weatheredge-data
-docker run --rm -v weatheredge_weatheredge-data:/data -v "$PWD:/backup" alpine \
-  tar xzf /backup/weatheredge-backup.tgz -C /data
-docker compose up -d
-```
-
-## Troubleshooting
-
-- `/health` fails: inspect `docker compose logs app`; confirm the container is running.
-- `/ready` fails: check `/data` ownership, `DATABASE_URL`, free disk space, and migration errors.
-- No markets: Gamma may have no matching active event, or its public schema changed; inspect `/api/v1/errors`.
-- Markets are rejected: inspect rule confidence, station mapping, bucket completeness, liquidity, spread, minimum order size, and ensemble-member counts.
-- No Telegram alert: verify both Telegram values and that the bot received an initial message from the target chat.
-- SQLite is locked: run only one WeatherEdge app process against a database file and keep the database on a local Docker volume, not NFS.
-
-## Known limitations
-
-The initial milestone supports daily maximum-temperature buckets only, begins with the audited `EGLC` station, and uses configured Open-Meteo models with equal model weighting. Rule overrides are explicit YAML audit entries; ambiguous or incomplete rules are rejected. Station observations are not yet used to update temperature probabilities. Provider availability and upstream schemas can change, model members can be biased or correlated, and a high modeled probability does not guarantee resolution.
+See [commercial boundaries](docs/commercial.md), [integrations](docs/integrations.md), [security policy](SECURITY.md), and [support](SUPPORT.md).
