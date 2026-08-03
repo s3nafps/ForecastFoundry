@@ -67,9 +67,17 @@ def test_mcp_stdio_lists_tools_without_executor_secrets() -> None:
         text=True,
         env=environment,
     )
-    stdout, _ = process.communicate(
-        "\n".join(json.dumps(request) for request in requests) + "\n", timeout=10
-    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    process.stdin.write(json.dumps(requests[0]) + "\n")
+    process.stdin.flush()
+    initialize_response = process.stdout.readline()
+    assert '"id":1' in initialize_response
+    process.stdin.write("\n".join(json.dumps(request) for request in requests[1:]) + "\n")
+    process.stdin.close()
+    remaining_stdout = process.stdout.read()
+    process.wait(timeout=10)
+    stdout = initialize_response + remaining_stdout
     assert process.returncode == 0
     assert "place_order" not in stdout
     assert "list_supported_domains" in stdout
