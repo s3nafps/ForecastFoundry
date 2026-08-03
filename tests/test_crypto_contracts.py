@@ -59,3 +59,54 @@ def test_rejects_ambiguous_generic_crypto_text() -> None:
     assert "quote_missing" in result.reasons
     assert "resolution_source_missing" in result.reasons
     assert "expiry_missing" in result.reasons
+
+
+def test_rejects_negated_and_multiple_resolution_sources() -> None:
+    negated = parse_crypto_market(
+        MarketInput(
+            market_id="negated-source",
+            title="Will BTC be above $100 at 2026-09-01 00:00 UTC?",
+            description=("Not Coinbase BTC-USD closing price, rounded to nearest dollar."),
+        )
+    )
+    multiple = parse_crypto_market(
+        MarketInput(
+            market_id="multiple-source",
+            title="Will BTC be above $100 at 2026-09-01 00:00 UTC?",
+            description=("Coinbase or Kraken BTC-USD closing price, rounded to nearest dollar."),
+        )
+    )
+
+    assert "resolution_source_negated" in negated.reasons
+    assert "resolution_source_ambiguous" in multiple.reasons
+
+
+def test_contract_persists_exact_comparison_and_rounding_semantics() -> None:
+    result = parse_crypto_market(
+        MarketInput(
+            market_id="inclusive-rounded",
+            title="Will BTC be at or above $100 at 2026-09-01 00:00 UTC?",
+            description=("Coinbase BTC-USD closing price, rounded to nearest dollar."),
+        )
+    )
+
+    assert result.accepted is True
+    assert result.contract is not None
+    assert result.contract.comparison == "above"
+    assert result.contract.comparison_inclusive is True
+    assert result.contract.rounding_increment == Decimal("1")
+    assert result.contract.rounding_mode == "half_up"
+
+
+def test_contract_accepts_plural_cents_rounding_definition() -> None:
+    result = parse_crypto_market(
+        MarketInput(
+            market_id="rounded-cents",
+            title="Will BTC be above $100 at 2026-09-01 00:00 UTC?",
+            description="Coinbase BTC-USD closing price, rounded to cents.",
+        )
+    )
+
+    assert result.accepted is True
+    assert result.contract is not None
+    assert result.contract.rounding_increment == Decimal("0.01")

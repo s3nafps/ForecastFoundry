@@ -29,12 +29,6 @@ def upgrade() -> None:
         )
         batch_op.create_unique_constraint("uq_evidence_snapshots_fingerprint", ["fingerprint"])
     op.create_index("ix_evidence_snapshots_contract_id", "evidence_snapshots", ["contract_id"])
-    op.create_index(
-        "ix_evidence_snapshots_fingerprint",
-        "evidence_snapshots",
-        ["fingerprint"],
-        unique=True,
-    )
 
     with op.batch_alter_table("prediction_runs") as batch_op:
         batch_op.add_column(sa.Column("evidence_snapshot_id", sa.Integer(), nullable=True))
@@ -44,6 +38,9 @@ def upgrade() -> None:
             ["evidence_snapshot_id"],
             ["id"],
             ondelete="SET NULL",
+        )
+        batch_op.create_unique_constraint(
+            "uq_prediction_runs_contract_input_hash", ["contract_id", "input_hash"]
         )
     op.create_index(
         "ix_prediction_runs_evidence_snapshot_id",
@@ -140,16 +137,10 @@ def upgrade() -> None:
         batch_op.create_check_constraint("ck_rejected_signals_side", "side IS NULL OR side = 'buy'")
     for column in ("contract_id", "prediction_run_id", "evidence_snapshot_id"):
         op.create_index(f"ix_rejected_signals_{column}", "rejected_signals", [column])
-    op.create_index(
-        "ix_rejected_signals_fingerprint",
-        "rejected_signals",
-        ["fingerprint"],
-        unique=True,
-    )
 
 
 def downgrade() -> None:
-    for column in ("fingerprint", "evidence_snapshot_id", "prediction_run_id", "contract_id"):
+    for column in ("evidence_snapshot_id", "prediction_run_id", "contract_id"):
         op.drop_index(f"ix_rejected_signals_{column}", table_name="rejected_signals")
     with op.batch_alter_table("rejected_signals") as batch_op:
         batch_op.drop_constraint("ck_rejected_signals_side", type_="check")
@@ -173,6 +164,9 @@ def downgrade() -> None:
         ):
             batch_op.drop_column(column)
 
+    # Crypto-only signals have no valid legacy market/outcome foreign keys. Drop only those rows;
+    # fabricating weather identities would corrupt audit history.
+    op.execute(sa.text("DELETE FROM signals WHERE market_id IS NULL OR outcome_id IS NULL"))
     for column in ("evidence_snapshot_id", "prediction_run_id", "contract_id"):
         op.drop_index(f"ix_signals_{column}", table_name="signals")
     with op.batch_alter_table("signals") as batch_op:
@@ -194,9 +188,9 @@ def downgrade() -> None:
 
     op.drop_index("ix_prediction_runs_evidence_snapshot_id", table_name="prediction_runs")
     with op.batch_alter_table("prediction_runs") as batch_op:
+        batch_op.drop_constraint("uq_prediction_runs_contract_input_hash", type_="unique")
         batch_op.drop_column("evidence_snapshot_id")
 
-    op.drop_index("ix_evidence_snapshots_fingerprint", table_name="evidence_snapshots")
     op.drop_index("ix_evidence_snapshots_contract_id", table_name="evidence_snapshots")
     with op.batch_alter_table("evidence_snapshots") as batch_op:
         batch_op.drop_constraint("uq_evidence_snapshots_fingerprint", type_="unique")

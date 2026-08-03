@@ -8,11 +8,12 @@ from decimal import Decimal
 from typing import Protocol, cast
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.domains.base import DomainRoute, MarketInput
-from app.domains.crypto import CryptoContract
+from app.domains.crypto import CryptoContract, normalize_named_resolution_source
 from app.domains.registry import DomainRegistry
 from app.models import (
     DomainContract,
@@ -79,6 +80,8 @@ class CryptoPaperPipeline:
         seed: int = 17,
         samples: int = 2_000,
     ) -> dict[str, object]:
+        if now is not None and now.tzinfo is None:
+            raise ValueError("now_must_be_timezone_aware")
         captured_at = (now or datetime.now(UTC)).astimezone(UTC)
         route = self.registry.route(market)
         if not route.accepted or not isinstance(route.contract, CryptoContract):
@@ -127,11 +130,13 @@ class CryptoPaperPipeline:
             current_price=current_price,
             comparison=cast(Comparison, contract.comparison),
             threshold=threshold,
+            comparison_inclusive=contract.comparison_inclusive,
+            rounding_increment=contract.rounding_increment,
             horizon=horizon,
             seed=seed,
             samples=samples,
         )
-        evidence_values = _evidence_values(market, contract, series)
+        evidence_values = _evidence_values(market, contract, gamma, series)
         evidence_fingerprint = _fingerprint(
             {
                 "contract": market.market_id,
@@ -173,6 +178,7 @@ class CryptoPaperPipeline:
             )
             await session.commit()
 
+        policy = _pricing_policy(self.settings)
         if self.pricing is None:
             return await self._reject_signal(
                 market,
@@ -181,8 +187,10 @@ class CryptoPaperPipeline:
                 evidence,
                 captured_at,
                 ("pricing_unavailable",),
-                fingerprint_seed={"input_hash": input_hash},
+                fingerprint_seed={"input_hash": input_hash, "policy": policy},
+                policy=policy,
             )
+        books: tuple[OrderBook, ...] = ()
         try:
             books = await self.pricing.get_order_books((outcomes["YES"][1], outcomes["NO"][1]))
             books_by_outcome = _match_books(gamma, outcomes, books)
@@ -197,7 +205,14 @@ class CryptoPaperPipeline:
                 evidence,
                 captured_at,
                 (reason,),
-                fingerprint_seed={"input_hash": input_hash},
+                fingerprint_seed={
+                    "input_hash": input_hash,
+                    "policy": policy,
+                    "books": [_fingerprint(book.raw_data) for book in books],
+                },
+                gamma=gamma,
+                books={book.asset_id: book for book in books},
+                policy=policy,
             )
 
         candidates = tuple(
@@ -209,13 +224,11 @@ class CryptoPaperPipeline:
                 estimate,
                 self.settings,
                 captured_at,
+                gamma.minimum_order_size,
             )
             for outcome, (_, token_id) in outcomes.items()
         )
-        chosen = max(
-            candidates,
-            key=lambda candidate: cast(Decimal, candidate["usable_edge"]),
-        )
+        chosen = max(candidates, key=_candidate_rank)
         reasons = _signal_reasons(gamma, books_by_outcome, chosen, self.settings, captured_at)
         fingerprint_seed = {
             "input_hash": input_hash,
@@ -223,6 +236,7 @@ class CryptoPaperPipeline:
                 outcome: _fingerprint(book.raw_data) for outcome, book in books_by_outcome.items()
             },
             "outcome": chosen["outcome"],
+            "policy": policy,
         }
         if reasons:
             return await self._reject_signal(
@@ -236,6 +250,7 @@ class CryptoPaperPipeline:
                 candidate=chosen,
                 gamma=gamma,
                 books=books_by_outcome,
+                policy=policy,
             )
         return await self._accept_signal(
             market,
@@ -247,6 +262,7 @@ class CryptoPaperPipeline:
             gamma,
             books_by_outcome,
             fingerprint_seed,
+            policy,
         )
 
     async def _reject_contract(
@@ -270,15 +286,23 @@ class CryptoPaperPipeline:
                 select(RejectedSignal).where(RejectedSignal.fingerprint == fingerprint)
             )
             if existing is None:
-                session.add(
-                    RejectedSignal(
-                        contract_id=contract.id,
-                        fingerprint=fingerprint,
-                        generated_at=captured_at,
-                        reasons=list(normalized_reasons),
-                        candidate_data={"market_id": market.market_id},
-                    )
+                candidate = RejectedSignal(
+                    contract_id=contract.id,
+                    fingerprint=fingerprint,
+                    generated_at=captured_at,
+                    reasons=list(normalized_reasons),
+                    candidate_data={"market_id": market.market_id},
                 )
+                try:
+                    async with session.begin_nested():
+                        session.add(candidate)
+                        await session.flush()
+                except IntegrityError:
+                    existing = await session.scalar(
+                        select(RejectedSignal).where(RejectedSignal.fingerprint == fingerprint)
+                    )
+                    if existing is None:
+                        raise
             await session.commit()
         return {
             "market_id": market.market_id,
@@ -318,8 +342,17 @@ class CryptoPaperPipeline:
                 "named_resolution_source": series.source,
             },
         )
-        session.add(evidence)
-        await session.flush()
+        try:
+            async with session.begin_nested():
+                session.add(evidence)
+                await session.flush()
+        except IntegrityError:
+            existing = await session.scalar(
+                select(EvidenceSnapshot).where(EvidenceSnapshot.fingerprint == fingerprint)
+            )
+            if existing is None:
+                raise
+            return cast(EvidenceSnapshot, existing)
         return evidence
 
     async def _prediction(
@@ -356,6 +389,9 @@ class CryptoPaperPipeline:
                 "interval_seconds": evidence.normalized_values["interval_seconds"],
                 "zero_drift": True,
                 "weighting": "equal",
+                "comparison_inclusive": estimate.comparison_inclusive,
+                "rounding_increment": str(estimate.rounding_increment),
+                "rounding_mode": estimate.rounding_mode,
             },
             probabilities={
                 "event": str(estimate.probability),
@@ -365,8 +401,20 @@ class CryptoPaperPipeline:
             uncertainty="bootstrap_monte_carlo_disagreement",
             status="signal_candidate",
         )
-        session.add(prediction)
-        await session.flush()
+        try:
+            async with session.begin_nested():
+                session.add(prediction)
+                await session.flush()
+        except IntegrityError:
+            existing = await session.scalar(
+                select(PredictionRun).where(
+                    PredictionRun.contract_id == contract.id,
+                    PredictionRun.input_hash == input_hash,
+                )
+            )
+            if existing is None:
+                raise
+            return cast(PredictionRun, existing)
         session.add_all(
             (
                 PredictionFeature(
@@ -398,6 +446,7 @@ class CryptoPaperPipeline:
         gamma: GammaMarket,
         books: dict[str, OrderBook],
         fingerprint_seed: dict[str, object],
+        policy: dict[str, str],
     ) -> dict[str, object]:
         fingerprint = _fingerprint({"kind": "crypto_signal", **fingerprint_seed})
         async with self.sessions() as session:
@@ -418,9 +467,18 @@ class CryptoPaperPipeline:
                     buffers=cast(dict[str, str], candidate["buffers"]),
                     fingerprint=fingerprint,
                     freshness_seconds=cast(int, candidate["freshness_seconds"]),
-                    signal_data=_candidate_data(gamma, books, candidate),
+                    signal_data=_candidate_data(gamma, books, candidate, policy),
                 )
-                session.add(signal)
+                try:
+                    async with session.begin_nested():
+                        session.add(signal)
+                        await session.flush()
+                except IntegrityError:
+                    existing = await session.scalar(
+                        select(Signal).where(Signal.fingerprint == fingerprint)
+                    )
+                    if existing is None:
+                        raise
                 await session.commit()
             else:
                 await session.rollback()
@@ -449,6 +507,7 @@ class CryptoPaperPipeline:
         candidate: dict[str, object] | None = None,
         gamma: GammaMarket | None = None,
         books: dict[str, OrderBook] | None = None,
+        policy: dict[str, str] | None = None,
     ) -> dict[str, object]:
         normalized_reasons = tuple(dict.fromkeys(reasons))
         fingerprint = _fingerprint(
@@ -463,38 +522,46 @@ class CryptoPaperPipeline:
                 select(RejectedSignal).where(RejectedSignal.fingerprint == fingerprint)
             )
             if existing is None:
-                session.add(
-                    RejectedSignal(
-                        contract_id=contract.id,
-                        prediction_run_id=prediction.id,
-                        evidence_snapshot_id=evidence.id,
-                        fingerprint=fingerprint,
-                        side="buy" if candidate else None,
-                        outcome_label=cast(str, candidate["outcome"]) if candidate else None,
-                        token_id=cast(str, candidate["token_id"]) if candidate else None,
-                        model_probability=(
-                            cast(Decimal, candidate["probability"]) if candidate else None
-                        ),
-                        executable_ask=(
-                            cast(Decimal, candidate["executable_ask"]) if candidate else None
-                        ),
-                        raw_edge=cast(Decimal, candidate["raw_edge"]) if candidate else None,
-                        usable_edge=(
-                            cast(Decimal, candidate["usable_edge"]) if candidate else None
-                        ),
-                        buffers=(cast(dict[str, str], candidate["buffers"]) if candidate else None),
-                        freshness_seconds=(
-                            cast(int, candidate["freshness_seconds"]) if candidate else None
-                        ),
-                        generated_at=captured_at,
-                        reasons=list(normalized_reasons),
-                        candidate_data=(
-                            _candidate_data(gamma, books or {}, candidate)
-                            if candidate and gamma
-                            else {"market_id": market.market_id}
-                        ),
-                    )
+                rejected = RejectedSignal(
+                    contract_id=contract.id,
+                    prediction_run_id=prediction.id,
+                    evidence_snapshot_id=evidence.id,
+                    fingerprint=fingerprint,
+                    side="buy" if candidate else None,
+                    outcome_label=cast(str, candidate["outcome"]) if candidate else None,
+                    token_id=cast(str, candidate["token_id"]) if candidate else None,
+                    model_probability=(
+                        cast(Decimal, candidate["probability"]) if candidate else None
+                    ),
+                    executable_ask=(
+                        cast(Decimal, candidate["executable_ask"]) if candidate else None
+                    ),
+                    raw_edge=cast(Decimal, candidate["raw_edge"]) if candidate else None,
+                    usable_edge=(cast(Decimal, candidate["usable_edge"]) if candidate else None),
+                    buffers=(cast(dict[str, str], candidate["buffers"]) if candidate else None),
+                    freshness_seconds=(
+                        cast(int, candidate["freshness_seconds"]) if candidate else None
+                    ),
+                    generated_at=captured_at,
+                    reasons=list(normalized_reasons),
+                    candidate_data=(
+                        _candidate_data(gamma, books or {}, candidate, policy or {})
+                        if candidate and gamma
+                        else _rejected_pricing_data(
+                            market.market_id, gamma, books or {}, policy or {}
+                        )
+                    ),
                 )
+                try:
+                    async with session.begin_nested():
+                        session.add(rejected)
+                        await session.flush()
+                except IntegrityError:
+                    existing = await session.scalar(
+                        select(RejectedSignal).where(RejectedSignal.fingerprint == fingerprint)
+                    )
+                    if existing is None:
+                        raise
                 await session.commit()
             else:
                 await session.rollback()
@@ -517,10 +584,18 @@ def _gamma_market(
     gamma = GammaMarket.model_validate(raw)
     if gamma.id != market.market_id or gamma.end_date != contract.expiry:
         raise ValueError("market_metadata_mismatch")
-    if gamma.resolution_source and contract.source not in gamma.resolution_source.lower():
+    try:
+        gamma_source = normalize_named_resolution_source(gamma.resolution_source)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    if gamma_source != contract.source:
         raise ValueError("resolution_source_mismatch")
     if len(gamma.outcomes) != 2 or len(gamma.token_ids) != 2:
         raise ValueError("binary_outcomes_required")
+    if len(set(gamma.token_ids)) != len(gamma.token_ids):
+        raise ValueError("yes_no_outcome_mapping_invalid")
+    if gamma.minimum_order_size is None or gamma.minimum_order_size <= 0:
+        raise ValueError("minimum_order_size_missing")
     outcomes: dict[str, tuple[str, str]] = {}
     for label, token_id in zip(gamma.outcomes, gamma.token_ids, strict=True):
         normalized = label.strip().upper()
@@ -546,13 +621,21 @@ def _match_books(
     books: Sequence[OrderBook],
 ) -> dict[str, OrderBook]:
     by_token = {book.asset_id: book for book in books}
-    if len(by_token) != len(books):
-        raise ValueError("duplicate_order_book")
+    expected_tokens = {token_id for _, token_id in outcomes.values()}
+    if len(by_token) != len(books) or set(by_token) != expected_tokens:
+        raise ValueError("order_book_token_set_mismatch")
     matched: dict[str, OrderBook] = {}
     for outcome, (_, token_id) in outcomes.items():
         book = by_token.get(token_id)
-        if book is None or book.condition_id != gamma.condition_id:
+        if (
+            book is None
+            or not gamma.condition_id
+            or not book.condition_id
+            or book.condition_id != gamma.condition_id
+        ):
             raise ValueError("order_book_mismatch")
+        if book.minimum_order_size != gamma.minimum_order_size:
+            raise ValueError("minimum_order_size_mismatch")
         _validate_order_book(book)
         matched[outcome] = book
     return matched
@@ -573,8 +656,22 @@ def _validate_order_book(book: OrderBook) -> None:
         raise ValueError("order_book_financial_invariant")
     if book.best_ask < book.best_bid or book.spread != book.best_ask - book.best_bid:
         raise ValueError("order_book_financial_invariant")
+    if book.midpoint != (book.best_ask + book.best_bid) / Decimal("2"):
+        raise ValueError("order_book_financial_invariant")
     if book.available_depth < 0 or book.minimum_order_size <= 0 or book.tick_size <= 0:
         raise ValueError("order_book_financial_invariant")
+    if tuple(sorted(book.asks, key=lambda level: level.price)) != book.asks:
+        raise ValueError("order_book_level_order_invalid")
+    if tuple(sorted(book.bids, key=lambda level: level.price, reverse=True)) != book.bids:
+        raise ValueError("order_book_level_order_invalid")
+    if not book.asks or not book.bids:
+        raise ValueError("order_book_incomplete")
+    if book.best_ask != book.asks[0].price or book.best_bid != book.bids[0].price:
+        raise ValueError("order_book_financial_invariant")
+    if book.available_depth != sum((level.size for level in book.asks), Decimal("0")):
+        raise ValueError("order_book_financial_invariant")
+    if any(level.price % book.tick_size for level in (*book.bids, *book.asks)):
+        raise ValueError("order_book_tick_mismatch")
     _book_time(book.timestamp)
 
 
@@ -586,8 +683,12 @@ def _side_candidate(
     estimate: ProbabilityEstimate,
     settings: Settings,
     now: datetime,
+    required_size: Decimal | None,
 ) -> dict[str, object]:
-    executable_ask = book.best_ask if book.best_ask is not None else Decimal("1")
+    if required_size is None or required_size <= 0:
+        raise ValueError("minimum_order_size_missing")
+    executable_ask = _execution_vwap(book, required_size)
+    edge_price = executable_ask if executable_ask is not None else cast(Decimal, book.best_ask)
     spread = book.spread if book.spread is not None else Decimal("1")
     liquidity_buffer = (
         min(
@@ -610,9 +711,11 @@ def _side_candidate(
         "liquidity": liquidity_buffer,
         "spread": spread,
     }
-    raw_edge = probability - executable_ask
-    usable_edge = raw_edge - sum(
-        (value for key, value in buffers.items() if key != "spread"), Decimal("0")
+    raw_edge = probability - edge_price
+    usable_edge = (
+        raw_edge - sum((value for key, value in buffers.items() if key != "spread"), Decimal("0"))
+        if executable_ask is not None
+        else None
     )
     book_time = _book_time(book.timestamp)
     return {
@@ -624,7 +727,26 @@ def _side_candidate(
         "usable_edge": usable_edge,
         "buffers": {key: str(value) for key, value in buffers.items()},
         "freshness_seconds": max(0, int((now - book_time).total_seconds())),
+        "required_size": required_size,
+        "fully_executable": executable_ask is not None,
     }
+
+
+def _execution_vwap(book: OrderBook, required_size: Decimal) -> Decimal | None:
+    remaining = required_size
+    total = Decimal("0")
+    for level in book.asks:
+        filled = min(remaining, level.size)
+        total += filled * level.price
+        remaining -= filled
+        if remaining == 0:
+            return total / required_size
+    return None
+
+
+def _candidate_rank(candidate: dict[str, object]) -> Decimal:
+    usable = candidate["usable_edge"]
+    return cast(Decimal, usable if usable is not None else candidate["raw_edge"])
 
 
 def _signal_reasons(
@@ -651,7 +773,10 @@ def _signal_reasons(
             reasons.append("order_book_clock_skew")
         elif now - book_time > timedelta(seconds=settings.polymarket_poll_seconds * 2):
             reasons.append("order_book_stale")
-    if cast(Decimal, chosen["usable_edge"]) < settings.min_usable_edge:
+    if not cast(bool, chosen["fully_executable"]):
+        reasons.append("insufficient_executable_depth")
+    usable_edge = cast(Decimal | None, chosen["usable_edge"])
+    if usable_edge is None or usable_edge < settings.min_usable_edge:
         reasons.append("usable_edge_below_minimum")
     return tuple(dict.fromkeys(reasons))
 
@@ -670,7 +795,10 @@ def _book_time(value: str) -> datetime:
 
 
 def _evidence_values(
-    market: MarketInput, contract: CryptoContract, series: CryptoSeries
+    market: MarketInput,
+    contract: CryptoContract,
+    gamma: GammaMarket,
+    series: CryptoSeries,
 ) -> dict[str, object]:
     return {
         "market_id": market.market_id,
@@ -686,6 +814,17 @@ def _evidence_values(
         "latest_price": str(series.candles[-1].close),
         "source_timestamp": series.latest_at.isoformat(),
         "retrieved_at": series.retrieved_at.isoformat(),
+        "request": {
+            "url": series.request_url,
+            "query": {key: series.request_params[key] for key in sorted(series.request_params)},
+        },
+        "market_acquisition": {
+            "provider": "polymarket_gamma",
+            "market_id": gamma.id,
+            "condition_id": gamma.condition_id,
+            "resolution_source": gamma.resolution_source,
+            "gamma_market_hash": _fingerprint(gamma.model_dump(mode="json")),
+        },
     }
 
 
@@ -693,6 +832,7 @@ def _candidate_data(
     gamma: GammaMarket,
     books: dict[str, OrderBook],
     candidate: dict[str, object],
+    policy: dict[str, str],
 ) -> dict[str, object]:
     return {
         "market": {
@@ -705,6 +845,11 @@ def _candidate_data(
         "candidate": {
             key: str(value) if isinstance(value, Decimal) else value
             for key, value in candidate.items()
+        },
+        "policy": policy,
+        "pricing_acquisition": {
+            "provider": "polymarket_clob",
+            "operation": "get_order_books",
         },
         "order_books": {
             outcome: {
@@ -720,6 +865,39 @@ def _candidate_data(
                 "raw_response_hash": _fingerprint(book.raw_data),
             }
             for outcome, book in books.items()
+        },
+    }
+
+
+def _pricing_policy(settings: Settings) -> dict[str, str]:
+    return {
+        "version": "crypto-signal-v2",
+        "required_size_basis": "gamma_clob_minimum_order_size",
+        "min_usable_edge": str(settings.min_usable_edge),
+        "max_spread": str(settings.max_spread),
+        "min_liquidity": str(settings.min_liquidity_usd),
+        "estimated_fee": str(settings.estimated_fee),
+        "slippage": str(settings.slippage_buffer),
+        "uncertainty": str(settings.uncertainty_buffer),
+        "rule_risk": str(settings.rule_risk_buffer),
+        "book_freshness_seconds": str(settings.polymarket_poll_seconds * 2),
+    }
+
+
+def _rejected_pricing_data(
+    market_id: str,
+    gamma: GammaMarket | None,
+    books: dict[str, OrderBook],
+    policy: dict[str, str],
+) -> dict[str, object]:
+    return {
+        "market_id": market_id,
+        "condition_id": gamma.condition_id if gamma else None,
+        "policy": policy,
+        "pricing_acquisition": {
+            "provider": "polymarket_clob",
+            "operation": "get_order_books",
+            "book_hashes": sorted(_fingerprint(book.raw_data) for book in books.values()),
         },
     }
 

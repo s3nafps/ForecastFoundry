@@ -28,6 +28,8 @@ class CryptoSeries:
     retrieved_at: datetime
     provider_version: str
     raw_response_hash: str
+    request_url: str
+    request_params: dict[str, object]
     quality_flags: tuple[str, ...] = ()
 
 
@@ -54,7 +56,11 @@ class CryptoMarketDataClient:
             return cached[1]
         url, params = _endpoint(source, asset, quote, granularity, limit)
         payload = await self.http.request_json("GET", url, params=params)
-        rows = _rows(source, payload)
+        rows = _rows(
+            source,
+            payload,
+            expected_pair=(_kraken_response_pair(asset, quote) if source == "kraken" else None),
+        )
         interval = _interval(granularity)
         series = normalize_candles(
             source,
@@ -63,6 +69,8 @@ class CryptoMarketDataClient:
             interval=interval,
             provider_version=f"{source}-public-candles-v1",
             raw_response=payload,
+            request_url=url,
+            request_params=params,
         )
         self._cache[key] = (now, series)
         return series
@@ -106,7 +114,9 @@ def _endpoint(
     raise ValueError(f"unsupported public crypto source: {source}")
 
 
-def _rows(source: str, payload: object) -> list[dict[str, object]]:
+def _rows(
+    source: str, payload: object, *, expected_pair: str | None = None
+) -> list[dict[str, object]]:
     raw_rows: object = payload
     if source == "kraken":
         if not isinstance(payload, dict) or not isinstance(payload.get("result"), dict):
@@ -115,7 +125,12 @@ def _rows(source: str, payload: object) -> list[dict[str, object]]:
         if not isinstance(errors, list) or errors:
             raise CryptoDataQualityError("provider_error")
         payload_result = payload["result"]
-        raw_rows = next((value for key, value in payload_result.items() if key != "last"), [])
+        pair_keys = [key for key in payload_result if key != "last"]
+        if len(pair_keys) != 1:
+            raise CryptoDataQualityError("provider_pair_ambiguous")
+        if expected_pair is None or pair_keys[0] != expected_pair:
+            raise CryptoDataQualityError("provider_pair_mismatch")
+        raw_rows = payload_result[pair_keys[0]]
     if not isinstance(raw_rows, list):
         raise CryptoDataQualityError("invalid_provider_payload")
     normalized_rows: list[dict[str, object]] = []
@@ -150,6 +165,8 @@ def normalize_candles(
     min_history: int = 3,
     provider_version: str | None = None,
     raw_response: object | None = None,
+    request_url: str = "normalized-fixture",
+    request_params: Mapping[str, object] | None = None,
 ) -> CryptoSeries:
     if not source.strip():
         raise CryptoDataQualityError("source_missing")
@@ -174,6 +191,17 @@ def normalize_candles(
         flags.append("source_descending_reversed")
     else:
         raise CryptoDataQualityError("out_of_order_candles")
+    interval_seconds = int(interval.total_seconds())
+    if any(
+        candle.timestamp.microsecond or int(candle.timestamp.timestamp()) % interval_seconds
+        for candle in ordered
+    ):
+        raise CryptoDataQualityError("candle_misaligned")
+    if any(
+        current.timestamp - previous.timestamp != interval
+        for previous, current in zip(ordered, ordered[1:], strict=False)
+    ):
+        raise CryptoDataQualityError("candle_gap")
     current = now.astimezone(UTC)
     if any(candle.timestamp > current for candle in ordered):
         raise CryptoDataQualityError("future_candle")
@@ -192,7 +220,7 @@ def normalize_candles(
     )
     normalized_payload = {
         "source": source,
-        "interval_seconds": int(interval.total_seconds()),
+        "interval_seconds": interval_seconds,
         "candles": [
             {"timestamp": candle.timestamp.isoformat(), "close": str(candle.close)}
             for candle in complete
@@ -203,12 +231,14 @@ def normalize_candles(
         candles=complete,
         log_returns=returns,
         latest_at=latest_at,
-        interval_seconds=int(interval.total_seconds()),
+        interval_seconds=interval_seconds,
         retrieved_at=current,
         provider_version=provider_version or f"{source}-normalized-v1",
         raw_response_hash=_hash_payload(
             raw_response if raw_response is not None else normalized_payload
         ),
+        request_url=request_url,
+        request_params=dict(request_params or {}),
         quality_flags=tuple(flags),
     )
 
@@ -246,6 +276,15 @@ def _interval(granularity: str) -> timedelta:
     if granularity == "1d":
         return timedelta(days=1)
     raise ValueError("unsupported_granularity")
+
+
+def _kraken_response_pair(asset: str, quote: str) -> str:
+    bases = {"BTC": "XXBT", "ETH": "XETH"}
+    quotes = {"USD": "ZUSD", "EUR": "ZEUR", "USDT": "USDT", "USDC": "USDC"}
+    try:
+        return f"{bases[asset.upper()]}{quotes[quote.upper()]}"
+    except KeyError as exc:
+        raise ValueError("unsupported_pair") from exc
 
 
 def _hash_payload(payload: object) -> str:

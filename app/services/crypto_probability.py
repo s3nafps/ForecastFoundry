@@ -2,7 +2,7 @@ import hashlib
 import math
 import random
 from collections.abc import Iterable
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -19,6 +19,9 @@ class ProbabilityEstimate(BaseModel):
     seed: int
     samples: int
     horizon: int
+    comparison_inclusive: bool
+    rounding_increment: Decimal | None
+    rounding_mode: str = "half_up"
     input_hash: str
     model_version: str = "crypto-baseline-v1"
 
@@ -59,6 +62,8 @@ def estimate_crypto_probability(
     current_price: Decimal,
     comparison: Comparison,
     threshold: Decimal | None,
+    comparison_inclusive: bool = False,
+    rounding_increment: Decimal | None = None,
     horizon: int,
     seed: int,
     samples: int = 5_000,
@@ -76,6 +81,8 @@ def estimate_crypto_probability(
         current_price=current_price,
         comparison=comparison,
         threshold=threshold,
+        comparison_inclusive=comparison_inclusive,
+        rounding_increment=rounding_increment,
     )
     sigma = ewma_volatility(values)
     rng = random.Random(seed + 1)
@@ -87,6 +94,8 @@ def estimate_crypto_probability(
         current_price=current_price,
         comparison=comparison,
         threshold=threshold,
+        comparison_inclusive=comparison_inclusive,
+        rounding_increment=rounding_increment,
     )
     probability = (bootstrap_probability + monte_carlo_probability) / Decimal("2")
     input_hash = hashlib.sha256(
@@ -99,6 +108,8 @@ def estimate_crypto_probability(
         seed=seed,
         samples=samples,
         horizon=horizon,
+        comparison_inclusive=comparison_inclusive,
+        rounding_increment=rounding_increment,
         input_hash=input_hash,
     )
 
@@ -119,6 +130,8 @@ def _event_probability(
     current_price: Decimal,
     comparison: Comparison,
     threshold: Decimal | None,
+    comparison_inclusive: bool,
+    rounding_increment: Decimal | None,
 ) -> Decimal:
     if threshold is None:
         raise ValueError("threshold or comparison baseline is required")
@@ -127,7 +140,14 @@ def _event_probability(
     paths = tuple(log_returns)
     for log_return in paths:
         final_price = current_price * log_return.exp()
-        hit = final_price >= target if comparison in {"above", "up"} else final_price <= target
+        if rounding_increment is not None:
+            if rounding_increment <= 0:
+                raise ValueError("rounding_increment must be positive")
+            final_price = final_price.quantize(rounding_increment, rounding=ROUND_HALF_UP)
+        if comparison in {"above", "up"}:
+            hit = final_price >= target if comparison_inclusive else final_price > target
+        else:
+            hit = final_price <= target if comparison_inclusive else final_price < target
         hits += int(hit)
     return Decimal(hits) / Decimal(len(paths))
 

@@ -85,3 +85,47 @@ def test_seeded_bootstrap_and_probability_are_reproducible() -> None:
 
 def test_ewma_volatility_shrinks_toward_zero_drift() -> None:
     assert ewma_volatility((Decimal("0"), Decimal("0")), decay=Decimal("0.94")) == Decimal("0")
+
+
+def test_probability_honors_strict_and_inclusive_equality() -> None:
+    strict = estimate_crypto_probability(
+        (Decimal("0"),),
+        current_price=Decimal("100"),
+        comparison="above",
+        threshold=Decimal("100"),
+        comparison_inclusive=False,
+        rounding_increment=Decimal("1"),
+        horizon=1,
+        seed=1,
+        samples=20,
+    )
+    inclusive = estimate_crypto_probability(
+        (Decimal("0"),),
+        current_price=Decimal("100"),
+        comparison="above",
+        threshold=Decimal("100"),
+        comparison_inclusive=True,
+        rounding_increment=Decimal("1"),
+        horizon=1,
+        seed=1,
+        samples=20,
+    )
+
+    assert strict.probability == Decimal("0")
+    assert inclusive.probability == Decimal("1")
+
+
+def test_probability_rounds_before_comparison() -> None:
+    rounded = estimate_crypto_probability(
+        (Decimal("0"),),
+        current_price=Decimal("99.6"),
+        comparison="above",
+        threshold=Decimal("100"),
+        comparison_inclusive=True,
+        rounding_increment=Decimal("1"),
+        horizon=1,
+        seed=1,
+        samples=20,
+    )
+
+    assert rounded.probability == Decimal("1")

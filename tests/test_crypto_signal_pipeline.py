@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 from collections.abc import Sequence
@@ -27,6 +28,7 @@ from app.services.crypto_data import (
     CryptoDataQualityError,
     CryptoSeries,
     _endpoint,
+    _rows,
     normalize_candles,
 )
 from app.services.crypto_pipeline import CryptoPaperPipeline
@@ -93,6 +95,33 @@ def _book(
     )
 
 
+def _depth_book(
+    token: str,
+    asks: tuple[tuple[str, str], ...],
+    *,
+    minimum_order_size: str = "5",
+    condition_id: str = "crypto-condition",
+) -> OrderBook:
+    ask_levels = tuple(OrderLevel(price=Decimal(price), size=Decimal(size)) for price, size in asks)
+    best_ask = ask_levels[0].price
+    best_bid = best_ask - Decimal("0.02")
+    return OrderBook(
+        condition_id=condition_id,
+        asset_id=token,
+        timestamp=str(int(NOW.timestamp() * 1000)),
+        bids=(OrderLevel(price=best_bid, size=Decimal("100")),),
+        asks=ask_levels,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        spread=Decimal("0.02"),
+        midpoint=(best_bid + best_ask) / 2,
+        available_depth=sum((level.size for level in ask_levels), Decimal("0")),
+        minimum_order_size=Decimal(minimum_order_size),
+        tick_size=Decimal("0.01"),
+        raw_data={"fixture": token, "asks": asks},
+    )
+
+
 class FixtureCryptoData:
     def __init__(
         self,
@@ -131,6 +160,8 @@ class FixtureCryptoData:
             min_history=self.min_history,
             provider_version=f"{source}-fixture-v1",
             raw_response={"source": source, "rows": [str(row) for row in self.rows]},
+            request_url=f"https://fixture.test/{source}/candles",
+            request_params={"pair": f"{asset}{quote}", "interval": granularity},
         )
 
 
@@ -200,6 +231,11 @@ async def test_accepts_yes_with_complete_reproducible_evidence_and_horizon(tmp_p
     assert evidence.contract_id == contract.id
     assert evidence.normalized_values["candles"][-1]["close"] == "101"
     assert evidence.normalized_values["interval_seconds"] == 3600
+    assert evidence.normalized_values["request"] == {
+        "url": "https://fixture.test/coinbase/candles",
+        "query": {"interval": "1h", "pair": "BTCUSD"},
+    }
+    assert len(evidence.normalized_values["market_acquisition"]["gamma_market_hash"]) == 64
     assert evidence.license_metadata["evidence_role"] == "authoritative_resolution"
     assert evidence.license_metadata["named_resolution_source"] == "coinbase"
     assert prediction.parameters["horizon"] == 4
@@ -226,6 +262,7 @@ async def test_accepts_yes_with_complete_reproducible_evidence_and_horizon(tmp_p
         "spread",
     }
     assert signal.freshness_seconds >= 0
+    assert signal.signal_data["policy"]["version"] == "crypto-signal-v2"
     await engine.dispose()
 
 
@@ -298,7 +335,7 @@ async def test_negative_edges_persist_one_rejection_and_never_become_yes_trade(
         (
             FixtureCryptoData(
                 rows=(
-                    CryptoCandle(NOW - timedelta(hours=5), Decimal("100")),
+                    CryptoCandle(NOW.replace(minute=0) - timedelta(hours=5), Decimal("100")),
                     CryptoCandle(NOW.replace(minute=0) - timedelta(hours=4), Decimal("101")),
                 ),
             ),
@@ -461,3 +498,345 @@ def test_crypto_signal_migration_round_trips(tmp_path: Path) -> None:
     with sqlite3.connect(database_path) as connection:
         signal_columns = {row[1] for row in connection.execute("PRAGMA table_info(signals)")}
     assert "contract_id" not in signal_columns
+
+
+@pytest.mark.asyncio
+async def test_uses_minimum_size_vwap_across_multiple_ask_levels(tmp_path: Path) -> None:
+    pipeline, engine, _ = await _pipeline(
+        tmp_path,
+        books=(
+            _depth_book("yes-token", (("0.40", "2"), ("0.50", "3"))),
+            _depth_book("no-token", (("0.65", "100"),)),
+        ),
+    )
+
+    result = await pipeline.run(
+        _market(expiry=datetime(2026, 8, 3, 16, tzinfo=UTC)),
+        now=NOW,
+        seed=7,
+        samples=500,
+    )
+
+    assert result["status"] == "accepted"
+    assert result["executable_price"] == "0.46"
+    async with pipeline.sessions() as session:
+        signal = await session.scalar(select(Signal))
+    assert signal is not None
+    assert signal.executable_ask == Decimal("0.46")
+    assert signal.signal_data["candidate"]["required_size"] == "5"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_rejects_when_asks_cannot_fill_minimum_size(tmp_path: Path) -> None:
+    pipeline, engine, _ = await _pipeline(
+        tmp_path,
+        books=(
+            _depth_book("yes-token", (("0.40", "2"), ("0.50", "2"))),
+            _depth_book("no-token", (("0.99", "100"),)),
+        ),
+    )
+
+    result = await pipeline.run(_market(expiry=datetime(2026, 8, 3, 16, tzinfo=UTC)), now=NOW)
+
+    assert result["status"] == "rejected"
+    assert "insufficient_executable_depth" in result["reasons"]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_rejects_duplicate_yes_no_token_ids(tmp_path: Path) -> None:
+    pipeline, engine, _ = await _pipeline(tmp_path)
+    market = _market(expiry=datetime(2026, 8, 3, 16, tzinfo=UTC))
+    raw = dict(market.raw_data["market"])
+    raw["token_ids"] = ["same-token", "same-token"]
+
+    result = await pipeline.run(market.model_copy(update={"raw_data": {"market": raw}}), now=NOW)
+
+    assert result["reasons"] == ["yes_no_outcome_mapping_invalid"]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_rejects_empty_gamma_resolution_source(tmp_path: Path) -> None:
+    pipeline, engine, _ = await _pipeline(tmp_path)
+    market = _market(expiry=datetime(2026, 8, 3, 16, tzinfo=UTC))
+    raw = dict(market.raw_data["market"])
+    raw["resolution_source"] = ""
+
+    result = await pipeline.run(market.model_copy(update={"raw_data": {"market": raw}}), now=NOW)
+
+    assert result["reasons"] == ["resolution_source_missing"]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("books", "reason"),
+    [
+        (
+            (
+                _book("yes-token", ask="0.40", bid="0.38"),
+                _book("no-token", ask="0.65", bid="0.63"),
+                _book("extra-token", ask="0.50", bid="0.48"),
+            ),
+            "order_book_token_set_mismatch",
+        ),
+        (
+            (
+                _depth_book("yes-token", (("0.40", "100"),), condition_id=""),
+                _book("no-token", ask="0.65", bid="0.63"),
+            ),
+            "order_book_mismatch",
+        ),
+        (
+            (
+                _depth_book("yes-token", (("0.40", "100"),), minimum_order_size="4"),
+                _book("no-token", ask="0.65", bid="0.63"),
+            ),
+            "minimum_order_size_mismatch",
+        ),
+    ],
+)
+async def test_rejects_inexact_book_mapping_and_minimums(
+    tmp_path: Path, books: tuple[OrderBook, ...], reason: str
+) -> None:
+    pipeline, engine, _ = await _pipeline(tmp_path, books=books)
+
+    result = await pipeline.run(_market(expiry=datetime(2026, 8, 3, 16, tzinfo=UTC)), now=NOW)
+
+    assert result["status"] == "rejected"
+    assert reason in result["reasons"]
+    await engine.dispose()
+
+
+def test_candles_require_exact_interval_cadence_and_alignment() -> None:
+    aligned = NOW.replace(minute=0)
+    with pytest.raises(CryptoDataQualityError, match="candle_gap"):
+        normalize_candles(
+            "binance",
+            (
+                CryptoCandle(aligned - timedelta(hours=4), Decimal("100")),
+                CryptoCandle(aligned - timedelta(hours=2), Decimal("101")),
+                CryptoCandle(aligned - timedelta(hours=1), Decimal("102")),
+            ),
+            now=NOW,
+            min_history=3,
+        )
+    with pytest.raises(CryptoDataQualityError, match="candle_misaligned"):
+        normalize_candles(
+            "binance",
+            tuple(
+                CryptoCandle(
+                    aligned - timedelta(hours=hours) + timedelta(minutes=5),
+                    Decimal(100 + hours),
+                )
+                for hours in (3, 2, 1)
+            ),
+            now=NOW,
+            min_history=3,
+        )
+
+
+def test_kraken_decoder_requires_exact_requested_pair() -> None:
+    row = [1785754800, "100", "101", "99", "100", "100", "1", 1]
+    with pytest.raises(CryptoDataQualityError, match="provider_pair_mismatch"):
+        _rows(
+            "kraken",
+            {"error": [], "result": {"ETHUSD": [row], "last": 1}},
+            expected_pair="XXBTZUSD",
+        )
+    with pytest.raises(CryptoDataQualityError, match="provider_pair_ambiguous"):
+        _rows(
+            "kraken",
+            {
+                "error": [],
+                "result": {"XBTUSD": [row], "XXBTZUSD": [row], "last": 1},
+            },
+            expected_pair="XXBTZUSD",
+        )
+
+
+def test_real_provider_candle_shapes_decode_to_exact_close_and_utc() -> None:
+    coinbase = _rows("coinbase", [[1785754800, 90, 110, 95, "101", 5]])
+    binance = _rows(
+        "binance",
+        [[1785754800000, "95", "110", "90", "102", "5", 1785758399999]],
+    )
+    kraken = _rows(
+        "kraken",
+        {
+            "error": [],
+            "result": {
+                "XXBTZUSD": [[1785754800, "95", "110", "90", "103", "100", "5", 1]],
+                "last": 1785754800,
+            },
+        },
+        expected_pair="XXBTZUSD",
+    )
+
+    assert [rows[0]["close"] for rows in (coinbase, binance, kraken)] == [
+        "101",
+        "102",
+        "103",
+    ]
+    assert all(rows[0]["timestamp"].tzinfo == UTC for rows in (coinbase, binance, kraken))
+
+
+@pytest.mark.asyncio
+async def test_rejects_naive_pipeline_time(tmp_path: Path) -> None:
+    pipeline, engine, _ = await _pipeline(tmp_path)
+    with pytest.raises(ValueError, match="now_must_be_timezone_aware"):
+        await pipeline.run(
+            _market(expiry=datetime(2026, 8, 3, 16, tzinfo=UTC)),
+            now=datetime(2026, 8, 3, 12, 30),
+        )
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_pricing_policy_changes_create_distinct_immutable_decisions(
+    tmp_path: Path,
+) -> None:
+    pipeline, engine, pricing = await _pipeline(tmp_path)
+    market = _market(expiry=datetime(2026, 8, 3, 16, tzinfo=UTC))
+    first = await pipeline.run(market, now=NOW, seed=7, samples=500)
+    changed = CryptoPaperPipeline(
+        pipeline.sessions,
+        pipeline.data,
+        pricing=pricing,
+        settings=pipeline.settings.model_copy(update={"slippage_buffer": Decimal("0.02")}),
+    )
+
+    second = await changed.run(market, now=NOW, seed=7, samples=500)
+
+    assert first["fingerprint"] != second["fingerprint"]
+    async with pipeline.sessions() as session:
+        signals = (await session.scalars(select(Signal).order_by(Signal.id))).all()
+    assert len(signals) == 2
+    assert signals[0].signal_data["policy"]["slippage"] == "0.01"
+    assert signals[1].signal_data["policy"]["slippage"] == "0.02"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_identical_accepted_runs_are_idempotent(tmp_path: Path) -> None:
+    pipeline, engine, _ = await _pipeline(tmp_path)
+    market = _market(expiry=datetime(2026, 8, 3, 16, tzinfo=UTC))
+
+    results = await asyncio.gather(
+        pipeline.run(market, now=NOW, seed=7, samples=500),
+        pipeline.run(market, now=NOW, seed=7, samples=500),
+    )
+
+    assert results[0] == results[1]
+    async with pipeline.sessions() as session:
+        counts = []
+        for model in (EvidenceSnapshot, PredictionRun, Signal):
+            counts.append(await session.scalar(select(func.count()).select_from(model)))
+    assert counts == [1, 1, 1]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_identical_rejected_runs_are_idempotent(tmp_path: Path) -> None:
+    pipeline, engine, _ = await _pipeline(
+        tmp_path,
+        books=(
+            _book("yes-token", ask="0.99", bid="0.97"),
+            _book("no-token", ask="0.99", bid="0.97"),
+        ),
+    )
+    market = _market(expiry=datetime(2026, 8, 3, 16, tzinfo=UTC))
+
+    results = await asyncio.gather(
+        pipeline.run(market, now=NOW, seed=7, samples=500),
+        pipeline.run(market, now=NOW, seed=7, samples=500),
+    )
+
+    assert results[0] == results[1]
+    async with pipeline.sessions() as session:
+        counts = []
+        for model in (EvidenceSnapshot, PredictionRun, RejectedSignal):
+            counts.append(await session.scalar(select(func.count()).select_from(model)))
+    assert counts == [1, 1, 1]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_contract_rejections_are_idempotent(tmp_path: Path) -> None:
+    pipeline, engine, _ = await _pipeline(tmp_path)
+    market = _market(expiry=datetime(2026, 8, 3, 12, tzinfo=UTC))
+
+    results = await asyncio.gather(
+        pipeline.run(market, now=NOW),
+        pipeline.run(market, now=NOW),
+    )
+
+    assert results[0] == results[1]
+    async with pipeline.sessions() as session:
+        count = await session.scalar(select(func.count()).select_from(RejectedSignal))
+    assert count == 1
+    await engine.dispose()
+
+
+def test_crypto_signal_downgrade_discards_only_nonlegacy_signal_rows(tmp_path: Path) -> None:
+    database_path = tmp_path / "crypto-signal-downgrade.db"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path.as_posix()}")
+    command.upgrade(config, "head")
+    created = NOW.isoformat()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO domain_contracts "
+            "(market_external_id, domain, accepted, contract_data, rejection_reasons, "
+            "provenance, fingerprint, created_at, updated_at) VALUES "
+            "('crypto-downgrade', 'crypto', 1, '{}', '[]', '{}', 'contract-fp', ?, ?)",
+            (created, created),
+        )
+        contract_id = connection.execute(
+            "SELECT id FROM domain_contracts WHERE fingerprint = 'contract-fp'"
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO evidence_snapshots "
+            "(contract_id, fingerprint, provider, retrieved_at, raw_response_hash, "
+            "normalized_values, quality_flags, license_metadata) "
+            "VALUES (?, 'evidence-fp', 'coinbase', ?, 'raw', '{}', '[]', '{}')",
+            (contract_id, created),
+        )
+        evidence_id = connection.execute(
+            "SELECT id FROM evidence_snapshots WHERE fingerprint = 'evidence-fp'"
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO prediction_runs "
+            "(contract_id, evidence_snapshot_id, generated_at, model_name, model_version, "
+            "input_hash, parameters, probabilities, status) "
+            "VALUES (?, ?, ?, 'crypto', 'v1', 'input', '{}', '{}', 'signal_candidate')",
+            (contract_id, evidence_id, created),
+        )
+        prediction_id = connection.execute(
+            "SELECT id FROM prediction_runs WHERE input_hash = 'input'"
+        ).fetchone()[0]
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO prediction_runs "
+                "(contract_id, evidence_snapshot_id, generated_at, model_name, model_version, "
+                "input_hash, parameters, probabilities, status) "
+                "VALUES (?, ?, ?, 'crypto', 'v1', 'input', '{}', '{}', 'signal_candidate')",
+                (contract_id, evidence_id, created),
+            )
+        connection.execute(
+            "INSERT INTO signals "
+            "(contract_id, prediction_run_id, evidence_snapshot_id, side, outcome_label, "
+            "token_id, generated_at, model_probability, executable_ask, raw_edge, "
+            "usable_edge, buffers, fingerprint, freshness_seconds, signal_data) VALUES "
+            "(?, ?, ?, 'buy', 'YES', 'yes-token', ?, 0.8, 0.4, 0.4, 0.3, '{}', "
+            "'signal-fp', 1, '{}')",
+            (contract_id, prediction_id, evidence_id, created),
+        )
+
+    command.downgrade(config, "0006")
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM signals").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM prediction_runs").fetchone() == (1,)

@@ -461,7 +461,14 @@ class EvidenceSnapshot(Base):
 
 class PredictionRun(Base):
     __tablename__ = "prediction_runs"
-    __table_args__ = (Index("ix_prediction_runs_market_generated", "market_id", "generated_at"),)
+    __table_args__ = (
+        Index("ix_prediction_runs_market_generated", "market_id", "generated_at"),
+        UniqueConstraint(
+            "contract_id",
+            "input_hash",
+            name="uq_prediction_runs_contract_input_hash",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))

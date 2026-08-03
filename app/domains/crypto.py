@@ -15,12 +15,15 @@ class CryptoContract(NormalizedMarket):
     quote: str
     source: str
     comparison: str
+    comparison_inclusive: bool
     threshold: Decimal | None = None
     comparison_reference_price: Decimal | None = None
     comparison_reference_time: datetime | None = None
     price_definition: str
     timezone: str = "UTC"
     rounding: str
+    rounding_increment: Decimal
+    rounding_mode: str = "half_up"
     original_rules: dict[str, object] = Field(default_factory=dict)
 
 
@@ -91,22 +94,21 @@ def parse_crypto_market(market: MarketInput) -> CryptoMarketResult:
     else:
         quote = quotes[0].upper()
 
-    found_sources = tuple(
-        name
-        for marker, name in CryptoPlugin._source_names.items()
-        if re.search(rf"\b{marker}\b", lowered)
-    )
-    if not found_sources:
-        reasons.append("resolution_source_missing")
+    try:
+        source = normalize_named_resolution_source(lowered)
+    except ValueError as exc:
+        reasons.append(str(exc))
         source = ""
-    elif len(found_sources) > 1:
-        reasons.append("resolution_source_ambiguous")
-        source = ""
-    else:
-        source = found_sources[0]
 
     comparison_match = re.search(r"\b(above|below|up|down)\b", lowered)
     comparison = comparison_match.group(1) if comparison_match else ""
+    comparison_inclusive = bool(
+        re.search(
+            r"\b(?:at or above|at least|greater than or equal|"
+            r"at or below|at most|less than or equal)\b",
+            lowered,
+        )
+    )
     threshold: Decimal | None = None
     comparison_reference_price: Decimal | None = None
     comparison_reference_time: datetime | None = None
@@ -134,9 +136,13 @@ def parse_crypto_market(market: MarketInput) -> CryptoMarketResult:
     if not price_definition:
         reasons.append("price_definition_missing")
 
-    rounding = _find_rounding(lowered)
-    if not rounding:
-        reasons.append("rounding_definition_missing")
+    rounding, rounding_increment = _parse_rounding(lowered)
+    if rounding is None:
+        reasons.append(
+            "rounding_definition_unsupported"
+            if re.search(r"\b(?:round|nearest|decimal|cent|dollar)\b", lowered)
+            else "rounding_definition_missing"
+        )
 
     if reasons:
         return CryptoMarketResult(accepted=False, reasons=tuple(dict.fromkeys(reasons)))
@@ -144,6 +150,7 @@ def parse_crypto_market(market: MarketInput) -> CryptoMarketResult:
     assert expiry is not None
     assert price_definition is not None
     assert rounding is not None
+    assert rounding_increment is not None
     contract = CryptoContract(
         market_id=market.market_id,
         domain="crypto",
@@ -156,11 +163,13 @@ def parse_crypto_market(market: MarketInput) -> CryptoMarketResult:
         quote=quote,
         source=source,
         comparison=comparison,
+        comparison_inclusive=comparison_inclusive,
         threshold=threshold,
         comparison_reference_price=comparison_reference_price,
         comparison_reference_time=comparison_reference_time,
         price_definition=price_definition,
         rounding=rounding,
+        rounding_increment=rounding_increment,
         original_rules={
             "title": market.title,
             "description": market.description,
@@ -182,6 +191,26 @@ def _parse_expiry(text: str) -> datetime | None:
         return datetime.fromisoformat(f"{match.group(1)}T{match.group(2)}+00:00").astimezone(UTC)
     except ValueError:
         return None
+
+
+def normalize_named_resolution_source(text: str) -> str:
+    lowered = text.lower()
+    if re.search(
+        r"\b(?:not|excluding|except)\s+(?:the\s+)?"
+        r"(?:coinbase|binance|kraken|chainlink|pyth|cf\s+benchmarks)\b",
+        lowered,
+    ):
+        raise ValueError("resolution_source_negated")
+    found = tuple(
+        name
+        for marker, name in CryptoPlugin._source_names.items()
+        if re.search(rf"\b{marker}\b", lowered)
+    )
+    if not found:
+        raise ValueError("resolution_source_missing")
+    if len(found) != 1:
+        raise ValueError("resolution_source_ambiguous")
+    return found[0]
 
 
 def _parse_comparison_reference(text: str) -> tuple[Decimal | None, datetime | None]:
@@ -211,13 +240,11 @@ def _find_price_definition(text: str) -> str | None:
     return None
 
 
-def _find_rounding(text: str) -> str | None:
-    match = re.search(
-        r"\b(?:rounded?|rounding)\s+to\s+(?:the\s+)?(?:nearest\s+)?([a-z0-9 .-]+?)(?:[,.]|$)",
-        text,
-    )
-    if match:
-        return f"rounded to {match.group(1).strip()}"
-    if re.search(r"\b(?:nearest|cents?|decimals?)\b", text):
-        return "explicit rounding"
-    return None
+def _parse_rounding(text: str) -> tuple[str | None, Decimal | None]:
+    if re.search(r"\b(?:nearest\s+)?(?:whole\s+)?dollar\b", text):
+        return "nearest dollar", Decimal("1")
+    if re.search(r"\b(?:nearest\s+)?cents?\b|\btwo\s+decimals?\b", text):
+        return "nearest cent", Decimal("0.01")
+    if re.search(r"\bone\s+decimal\b|\bnearest\s+tenth\b", text):
+        return "nearest tenth", Decimal("0.1")
+    return None, None
