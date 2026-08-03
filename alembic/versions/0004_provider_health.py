@@ -34,7 +34,9 @@ def upgrade() -> None:
         "provider_health_snapshots",
         ["provider", "checked_at"],
     )
-    op.create_index("ix_provider_health_snapshots_provider", "provider_health_snapshots", ["provider"])
+    op.create_index(
+        "ix_provider_health_snapshots_provider", "provider_health_snapshots", ["provider"]
+    )
 
 
 def downgrade() -> None:

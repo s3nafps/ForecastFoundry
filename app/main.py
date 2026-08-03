@@ -4,10 +4,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
 from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import select, text
 
 from app import PRODUCT_NAME
@@ -18,6 +20,7 @@ from app.database import make_engine, make_session_factory
 from app.domains.base import MarketInput
 from app.logging import configure_logging
 from app.models import OrderBookSnapshot, Outcome, ProviderError
+from app.observability import Metrics
 from app.providers.registry import ProviderRegistry
 from app.schemas import OrderBook
 from app.services.application import ApplicationServices
@@ -77,6 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         app.state.settings = resolved
         app.state.sessions = sessions
+        app.state.metrics = Metrics()
         crypto_data = CryptoMarketDataClient(provider_http)
         providers = (
             ProviderHealthMonitor(sessions, ProviderRegistry.default(), provider_http)
@@ -91,21 +95,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
         async def scheduled_scan() -> str:
-            async with sessions() as session:
-                control = await ExecutionControl(session).snapshot()
-            if control.paused:
-                return "paused"
-            await scan_once(
-                settings=resolved,
-                sessions=sessions,
-                polymarket=polymarket,
-                forecast_providers=forecasts,
-                stations=stations,
-                overrides=overrides,
-                telegram=telegram,
-                now=datetime.now(UTC),
+            services = cast(ApplicationServices, app.state.services)
+            return await services.run_scheduled_scan(
+                lambda: scan_once(
+                    settings=resolved,
+                    sessions=sessions,
+                    polymarket=polymarket,
+                    forecast_providers=forecasts,
+                    stations=stations,
+                    overrides=overrides,
+                    telegram=telegram,
+                    now=datetime.now(UTC),
+                )
             )
-            return "completed"
 
         async def scheduled_crypto_scan() -> str:
             async with sessions() as session:
@@ -189,7 +191,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         scheduler: AsyncIOScheduler | None = None
         websocket_task: asyncio.Task[None] | None = None
-        if resolved.app_env != "test":
+        if resolved.app_env != "test" and resolved.scheduler_enabled:
             scheduler = AsyncIOScheduler(timezone="UTC")
             scheduler.add_job(
                 scheduled_scan,
@@ -231,6 +233,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async with request.app.state.sessions() as session:
             await session.execute(text("SELECT 1"))
         return {"status": "ready"}
+
+    @application.get("/metrics", response_class=PlainTextResponse)
+    async def metrics(request: Request) -> str:
+        return cast(Metrics, request.app.state.metrics).render()
 
     if resolved.app_env == "test":
 

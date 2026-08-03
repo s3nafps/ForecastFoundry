@@ -34,6 +34,9 @@ dev = [
 live = [
   "py-clob-client-v2>=0.1",
 ]
+postgres = [
+  "asyncpg>=0.29",
+]
 
 [project.scripts]
 forecastfoundry = "app.cli:main"

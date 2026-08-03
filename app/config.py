@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     polymarket_chain_id: int = Field(default=137, gt=0)
     polymarket_funder_address: str | None = None
     hermes_mcp_enabled: bool = True
+    scheduler_enabled: bool = True
     polymarket_websocket_enabled: bool = False
     gamma_api_url: str = "https://gamma-api.polymarket.com"
     clob_api_url: str = "https://clob.polymarket.com"

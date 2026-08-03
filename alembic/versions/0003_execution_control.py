@@ -52,7 +52,8 @@ def upgrade() -> None:
     op.execute(
         "INSERT INTO execution_control_state "
         "(id, paused, revision, request_id, actor, reason, updated_at) "
-        "VALUES (1, 1, 0, 'migration-0003', 'migration', 'startup safety default', CURRENT_TIMESTAMP)"
+        "VALUES (1, 1, 0, 'migration-0003', 'migration', "
+        "'startup safety default', CURRENT_TIMESTAMP)"
     )
 
 

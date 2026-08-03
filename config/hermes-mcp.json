@@ -3,7 +3,8 @@
   "command": "forecastfoundry",
   "args": ["mcp"],
   "env": {
-    "EXECUTION_ENABLED": "false"
+    "EXECUTION_ENABLED": "false",
+    "FORECASTFOUNDRY_MCP_OPERATOR_TOKEN": "${FORECASTFOUNDRY_MCP_OPERATOR_TOKEN}"
   },
   "allow_tools": [
     "list_supported_domains",

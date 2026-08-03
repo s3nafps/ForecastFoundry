@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install ".[dev]"
+      - run: mkdir -p data
+      - run: pytest -q
+      - run: ruff check .
+      - run: mypy app
+      - run: DATABASE_URL=sqlite+aiosqlite:///./data/ci.db alembic upgrade head
+      - run: git diff --check
+      - name: Secret material scan
+        run: |
+          ! rg -n "BEGIN (RSA|EC|OPENSSH) PRIVATE KEY|(^|[= ])(sk|pk)-[A-Za-z0-9_-]{20,}" --glob '!*.lock' --glob '!.venv/**' .

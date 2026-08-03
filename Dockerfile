@@ -26,5 +26,5 @@ RUN chmod 0555 /app/docker/*.sh
 
 USER forecastfoundry
 EXPOSE 8000
-ENTRYPOINT ["/app/docker/executor-entrypoint.sh"]
+ENTRYPOINT ["/app/docker/web-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

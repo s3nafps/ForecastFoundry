@@ -69,7 +69,11 @@ class CryptoPaperPipeline:
         )
         contract_payload = contract.model_dump(mode="json")
         contract_hash = hashlib.sha256(
-            json.dumps(contract_payload, sort_keys=True, separators=(",", ":")).encode()
+            json.dumps(
+                {"market_id": market.market_id, "contract": contract_payload},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
         ).hexdigest()
         evidence_payload = {
             "market_id": market.market_id,

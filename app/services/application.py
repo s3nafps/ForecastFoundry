@@ -3,7 +3,7 @@
 import hashlib
 import json
 import os
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -27,7 +27,7 @@ from app.models import (
 )
 from app.providers.registry import ProviderRegistry, ProviderSecretError
 from app.services.execution_control import ControlSnapshot, ExecutionControl
-from app.services.operator_auth import OperatorAuth
+from app.services.operator_auth import OperatorAuth, OperatorAuthError
 
 
 class ApplicationServiceError(RuntimeError):
@@ -79,31 +79,36 @@ class ApplicationServices:
                 )
                 route = self.registry.route(market)
                 contract = route.contract
-                if contract is not None:
-                    fingerprint = _fingerprint(
-                        {
-                            "market_id": contract.market_id,
-                            "domain": contract.domain,
-                            "contract": contract.model_dump(mode="json"),
-                        }
-                    )
-                    existing = await session.scalar(
-                        select(DomainContract).where(DomainContract.fingerprint == fingerprint)
-                    )
-                    if existing is None:
-                        session.add(
-                            DomainContract(
-                                market_external_id=contract.market_id,
-                                domain=contract.domain,
-                                accepted=route.accepted,
-                                resolution_source=contract.resolution_source,
-                                expiry=contract.expiry,
-                                contract_data=contract.model_dump(mode="json"),
-                                rejection_reasons=list(route.reasons),
-                                provenance=contract.provenance,
-                                fingerprint=fingerprint,
-                            )
+                fingerprint = _fingerprint(
+                    {
+                        "market_id": market.market_id,
+                        "domain": contract.domain if contract else route.domain,
+                        "contract": contract.model_dump(mode="json")
+                        if contract
+                        else {"title": market.title, "description": market.description},
+                    }
+                )
+                existing = await session.scalar(
+                    select(DomainContract).where(DomainContract.fingerprint == fingerprint)
+                )
+                if existing is None:
+                    session.add(
+                        DomainContract(
+                            market_external_id=market.market_id,
+                            domain=contract.domain if contract else (route.domain or "unknown"),
+                            accepted=route.accepted,
+                            resolution_source=contract.resolution_source if contract else None,
+                            expiry=contract.expiry if contract else None,
+                            contract_data=(
+                                contract.model_dump(mode="json")
+                                if contract
+                                else {"title": market.title, "description": market.description}
+                            ),
+                            rejection_reasons=list(route.reasons),
+                            provenance=contract.provenance if contract else {"title": "polymarket"},
+                            fingerprint=fingerprint,
                         )
+                    )
                 results.append(
                     {
                         "market_id": market.market_id,
@@ -114,6 +119,7 @@ class ApplicationServices:
                     }
                 )
                 if route.accepted and route.domain == "crypto" and self.crypto_pipeline is not None:
+                    await session.commit()
                     pipeline_result = await self.crypto_pipeline.run(market, now=captured_at)  # type: ignore[attr-defined]
                     results[-1]["pipeline"] = pipeline_result
             await session.commit()
@@ -280,6 +286,13 @@ class ApplicationServices:
         async with self.sessions() as session:
             return await ExecutionControl(session).snapshot()
 
+    async def run_scheduled_scan(self, scan: Callable[[], Awaitable[None]]) -> str:
+        async with self.sessions() as session:
+            if (await ExecutionControl(session).snapshot()).paused:
+                return "paused"
+        await scan()
+        return "completed"
+
     async def set_execution(
         self,
         paused: bool,
@@ -297,7 +310,11 @@ class ApplicationServices:
                 bootstrap_token=bootstrap_token or os.getenv("FORECASTFOUNDRY_OPERATOR_TOKEN"),
             )
             permission = f"execution:{'pause' if paused else 'resume'}"
-            credential = await auth.authenticate(token, permission)
+            try:
+                credential = await auth.authenticate(token, permission)
+            except OperatorAuthError:
+                await session.commit()
+                raise
             snapshot = await ExecutionControl(session).set_paused(
                 paused,
                 actor=f"{actor}:{credential.name}",

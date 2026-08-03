@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import sys
 from collections.abc import Awaitable, Callable
 from typing import Any
 from weakref import WeakKeyDictionary
@@ -58,8 +59,9 @@ class MCPFacade:
                     app_env="mcp",
                 )
                 self._engine = make_engine(settings.database_url)
-                async with self._engine.begin() as connection:
-                    await connection.run_sync(Base.metadata.create_all)
+                if "pytest" in sys.modules:
+                    async with self._engine.begin() as connection:
+                        await connection.run_sync(Base.metadata.create_all)
                 sessions: async_sessionmaker[AsyncSession] = make_session_factory(self._engine)
                 self._services = ApplicationServices(sessions, settings)
         assert self._services is not None
