@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     max_exposure_fraction: Decimal = Field(default=Decimal("0.25"), gt=0, le=Decimal("0.25"))
     max_daily_loss_fraction: Decimal = Field(default=Decimal("0.10"), gt=0, le=Decimal("0.10"))
     geoblock_url: str = "https://polymarket.com/api/geoblock"
+    polymarket_chain_id: int = Field(default=137, gt=0)
+    polymarket_funder_address: str | None = None
     hermes_mcp_enabled: bool = True
     polymarket_websocket_enabled: bool = False
     gamma_api_url: str = "https://gamma-api.polymarket.com"

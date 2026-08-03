@@ -1,8 +1,8 @@
-import stat
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.config import Settings
+from app.services.keystore import KeystoreError, validate_encrypted_keystore
 
 
 class ExecutionSafetyError(ValueError):
@@ -32,9 +32,7 @@ def assert_startup_safe(settings: Settings) -> None:
         return
     assert settings.keystore_path is not None
     path = Path(settings.keystore_path)
-    if not path.is_file():
-        raise ExecutionSafetyError("encrypted keystore file is missing")
-    if path.stat().st_size == 0:
-        raise ExecutionSafetyError("encrypted keystore file is empty")
-    if stat.S_ISREG(path.stat().st_mode) is False:
-        raise ExecutionSafetyError("keystore path is not a regular file")
+    try:
+        validate_encrypted_keystore(path)
+    except KeystoreError as exc:
+        raise ExecutionSafetyError(str(exc)) from exc

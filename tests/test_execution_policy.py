@@ -4,6 +4,7 @@ import pytest
 
 from app.config import Settings
 from app.services.execution_policy import ExecutionSafetyError, assert_startup_safe
+from app.services.keystore import encrypt_keystore
 
 
 def live_settings(path: Path) -> Settings:
@@ -25,6 +26,6 @@ def test_paper_mode_does_not_require_a_keystore() -> None:
 
 def test_live_mode_accepts_a_strict_keystore_file(tmp_path: Path) -> None:
     keystore = tmp_path / "bot.json"
-    keystore.write_text("{}", encoding="utf-8")
+    encrypt_keystore(keystore, "password", {"private_key": "0xprivate"})
 
     assert_startup_safe(live_settings(keystore))
