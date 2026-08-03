@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from app import COMPATIBILITY_VERSION, PRODUCT_NAME
+from app.mcp_policy import MCPPolicyError, audit_operator_action, require_operator
 from app.models import (
     ApplicationSetting,
     Event,
@@ -25,7 +26,6 @@ from app.models import (
     RejectedSignal,
     Signal,
 )
-from app.mcp_policy import MCPPolicyError, audit_operator_action, require_operator
 from app.providers.registry import ProviderRegistry
 
 router = APIRouter(prefix="/api/v1")
