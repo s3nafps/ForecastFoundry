@@ -2,7 +2,7 @@ from decimal import Decimal
 from typing import cast
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app import COMPATIBILITY_VERSION, PRODUCT_NAME
@@ -34,6 +34,19 @@ class OperatorAction(BaseModel):
     reason: str
     request_id: str | None = None
     expected_revision: int | None = None
+
+
+class SettlementPayload(BaseModel):
+    contract_id: int
+    source: str
+    observed_at: str
+    retrieved_at: str
+    outcome_label: str
+    raw_response_hash: str
+    normalized_values: dict[str, object] = Field(default_factory=dict)
+    provider_version: str | None = None
+    quality_flags: list[str] = Field(default_factory=list)
+    license_metadata: dict[str, object] = Field(default_factory=dict)
 
 
 async def market_rows(request: Request) -> list[dict[str, object]]:
@@ -340,6 +353,32 @@ async def execution_status(request: Request) -> dict[str, object]:
         "control": control.as_dict(),
         "wallet_custody": False,
     }
+
+
+@router.get("/portfolio")
+async def portfolio(request: Request) -> dict[str, object]:
+    services = cast(ApplicationServices, request.app.state.services)
+    return await services.portfolio_status()
+
+
+@router.post("/paper/signals/{signal_id}/execute")
+async def execute_paper_signal(signal_id: int, request: Request) -> dict[str, object]:
+    services = cast(ApplicationServices, request.app.state.services)
+    try:
+        return await services.execute_paper_signal(signal_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/paper/positions/{position_id}/settle")
+async def settle_position(
+    position_id: int, payload: SettlementPayload, request: Request
+) -> dict[str, object]:
+    services = cast(ApplicationServices, request.app.state.services)
+    try:
+        return await services.settle_paper_position(position_id, payload.model_dump(mode="json"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/orders/reconciliation")

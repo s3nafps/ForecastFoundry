@@ -49,6 +49,11 @@ async def test_read_only_api_and_escaped_dashboard(tmp_path: Path) -> None:
         )
     )
     async with app.router.lifespan_context(app):
+        assert await app.state.run_settlement() == {
+            "status": "not_configured",
+            "settled": 0,
+            "reason": "authoritative_settlement_fetcher_missing",
+        }
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             for path in (

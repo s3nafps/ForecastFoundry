@@ -30,6 +30,8 @@ ALLOWED_TOOLS = (
     "run_backtest",
     "provider_health",
     "portfolio_status",
+    "execute_paper_signal",
+    "settle_paper_position",
     "reconcile_orders",
     "pause_execution",
     "resume_execution",
@@ -92,6 +94,14 @@ class MCPFacade:
 
     async def portfolio_status(self) -> dict[str, object]:
         return await (await self._get_services()).portfolio_status()
+
+    async def execute_paper_signal(self, signal_id: int) -> dict[str, object]:
+        return await (await self._get_services()).execute_paper_signal(signal_id)
+
+    async def settle_paper_position(
+        self, position_id: int, evidence: dict[str, object]
+    ) -> dict[str, object]:
+        return await (await self._get_services()).settle_paper_position(position_id, evidence)
 
     async def reconcile_orders(self) -> dict[str, object]:
         return await (await self._get_services()).reconcile_orders()

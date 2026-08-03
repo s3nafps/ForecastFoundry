@@ -33,6 +33,22 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status", help="show persisted execution and paper status")
     status.add_argument("--json", action="store_true")
 
+    portfolio = subparsers.add_parser("portfolio", help="show authoritative paper portfolio")
+    portfolio.add_argument("--json", action="store_true")
+
+    evidence = subparsers.add_parser("evidence", help="show immutable market evidence")
+    evidence.add_argument("--market-id", required=True)
+    evidence.add_argument("--json", action="store_true")
+
+    explain = subparsers.add_parser("explain", help="explain the latest persisted prediction")
+    explain.add_argument("--market-id", required=True)
+    explain.add_argument("--json", action="store_true")
+
+    settle = subparsers.add_parser("settle", help="settle one paper position from evidence")
+    settle.add_argument("--position-id", required=True, type=int)
+    settle.add_argument("--evidence-json", required=True)
+    settle.add_argument("--json", action="store_true")
+
     reconcile = subparsers.add_parser("reconcile", help="reconcile persisted order state")
     reconcile.add_argument("--json", action="store_true")
 
@@ -83,8 +99,17 @@ async def _execute(args: argparse.Namespace) -> dict[str, object]:
             if not args.dataset:
                 raise ApplicationServiceError("--dataset is required for backtest")
             return await services.run_backtest(args.dataset)
-        if args.command == "status":
+        if args.command in {"status", "portfolio"}:
             return await services.portfolio_status()
+        if args.command == "evidence":
+            return await services.get_market_evidence(args.market_id)
+        if args.command == "explain":
+            return await services.explain_prediction(args.market_id)
+        if args.command == "settle":
+            evidence = json.loads(args.evidence_json)
+            if not isinstance(evidence, dict):
+                raise ApplicationServiceError("--evidence-json must contain an object")
+            return await services.settle_paper_position(args.position_id, evidence)
         if args.command == "reconcile":
             return await services.reconcile_orders()
         if args.command in {"pause", "resume"}:

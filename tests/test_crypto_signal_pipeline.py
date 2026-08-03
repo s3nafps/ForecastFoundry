@@ -16,8 +16,14 @@ from app.database import make_engine, make_session_factory
 from app.domains.base import MarketInput
 from app.models import (
     Base,
+    CalibrationMetric,
     DomainContract,
     EvidenceSnapshot,
+    ExecutionFill,
+    ExecutionOrder,
+    PaperExecutionDecision,
+    PaperPosition,
+    PaperSettlement,
     PredictionRun,
     RejectedSignal,
     Signal,
@@ -32,6 +38,7 @@ from app.services.crypto_data import (
     normalize_candles,
 )
 from app.services.crypto_pipeline import CryptoPaperPipeline
+from app.services.paper import PaperLifecycle, SettlementEvidence
 from app.services.polymarket import parse_order_book
 
 NOW = datetime(2026, 8, 3, 12, 30, tzinfo=UTC)
@@ -187,6 +194,7 @@ def _settings(database_url: str) -> Settings:
         slippage_buffer=Decimal("0.01"),
         uncertainty_buffer=Decimal("0.01"),
         rule_risk_buffer=Decimal("0.01"),
+        paper_starting_balance=Decimal("100"),
     )
 
 
@@ -221,6 +229,7 @@ async def test_accepts_yes_with_complete_reproducible_evidence_and_horizon(tmp_p
 
     assert result["status"] == "accepted"
     assert result["outcome"] == "YES"
+    assert result["paper"]["status"] == "filled"
     assert pricing.requested == ("yes-token", "no-token")
     async with pipeline.sessions() as session:
         contract = await session.scalar(select(DomainContract))
@@ -264,6 +273,42 @@ async def test_accepts_yes_with_complete_reproducible_evidence_and_horizon(tmp_p
     }
     assert signal.freshness_seconds >= 0
     assert signal.signal_data["policy"]["version"] == "crypto-signal-v2"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_btc_fixture_runs_through_settlement_and_calibration(tmp_path: Path) -> None:
+    pipeline, engine, _ = await _pipeline(tmp_path)
+    expiry = datetime(2026, 8, 3, 16, tzinfo=UTC)
+
+    result = await pipeline.run(_market(expiry=expiry), now=NOW, seed=7, samples=500)
+    assert result["paper"]["status"] == "filled"
+    async with pipeline.sessions() as session:
+        contract = await session.scalar(select(DomainContract))
+    assert contract is not None
+    settlement = await PaperLifecycle(pipeline.sessions, pipeline.settings).settle_position(
+        int(result["paper"]["position_id"]),
+        SettlementEvidence(
+            contract_id=contract.id,
+            source="coinbase",
+            observed_at=expiry,
+            retrieved_at=expiry + timedelta(minutes=1),
+            outcome_label="YES",
+            raw_response_hash="btc-resolution-fixture",
+            normalized_values={"close": "101", "threshold": "90"},
+            provider_version="coinbase-fixture-v1",
+        ),
+    )
+    assert settlement["won"] is True
+    async with pipeline.sessions() as session:
+        for model in (
+            ExecutionOrder,
+            ExecutionFill,
+            PaperPosition,
+            PaperSettlement,
+            CalibrationMetric,
+        ):
+            assert await session.scalar(select(func.count()).select_from(model)) == 1
     await engine.dispose()
 
 
@@ -930,9 +975,17 @@ async def test_concurrent_identical_accepted_runs_are_idempotent(tmp_path: Path)
     assert results[0] == results[1]
     async with pipeline.sessions() as session:
         counts = []
-        for model in (EvidenceSnapshot, PredictionRun, Signal):
+        for model in (
+            EvidenceSnapshot,
+            PredictionRun,
+            Signal,
+            PaperExecutionDecision,
+            ExecutionOrder,
+            ExecutionFill,
+            PaperPosition,
+        ):
             counts.append(await session.scalar(select(func.count()).select_from(model)))
-    assert counts == [1, 1, 1]
+    assert counts == [1, 1, 1, 1, 1, 1, 1]
     await engine.dispose()
 
 

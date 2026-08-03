@@ -14,8 +14,10 @@ from app.domains.base import MarketInput
 from app.domains.registry import DomainRegistry
 from app.models import (
     ApplicationSetting,
+    CalibrationMetric,
     DomainContract,
     EvidenceSnapshot,
+    ExecutionFill,
     ExecutionOrder,
     PaperPosition,
     PaperSettlement,
@@ -27,6 +29,12 @@ from app.providers.registry import ProviderRegistry, ProviderSecretError
 from app.services.contracts import persist_domain_contract
 from app.services.execution_control import ControlSnapshot, ExecutionControl
 from app.services.operator_auth import OperatorAuth, OperatorAuthError
+from app.services.paper import (
+    PaperLifecycle,
+    SettlementEvidence,
+    SettlementFetcher,
+    SettlementWorker,
+)
 
 
 class ApplicationServiceError(RuntimeError):
@@ -207,6 +215,13 @@ class ApplicationServices:
             balance = await session.get(ApplicationSetting, "paper_balance")
             positions = (await session.scalars(select(PaperPosition))).all()
             settlements = (await session.scalars(select(PaperSettlement))).all()
+            orders = (
+                await session.scalars(select(ExecutionOrder).where(ExecutionOrder.mode == "paper"))
+            ).all()
+            fills = (await session.scalars(select(ExecutionFill))).all()
+            calibrations = (await session.scalars(select(CalibrationMetric))).all()
+        realized = sum((row.realized_pnl for row in settlements), start=0)
+        unrealized = sum((row.unrealized_pnl for row in positions if row.status == "open"), start=0)
         return {
             "mode": "PAPER_ONLY" if not self.settings.execution_enabled else "LIVE_GATED",
             "paused": control.paused,
@@ -218,6 +233,75 @@ class ApplicationServices:
             ),
             "open_positions": sum(position.status == "open" for position in positions),
             "settlements": len(settlements),
+            "paper_orders": len(orders),
+            "paper_fills": len(fills),
+            "realized_pnl": str(realized),
+            "unrealized_pnl": str(unrealized),
+            "calibration_records": len(calibrations),
+            "positions": [
+                {
+                    "id": row.id,
+                    "signal_id": row.signal_id,
+                    "order_id": row.execution_order_id,
+                    "status": row.status,
+                    "entry_price": str(row.entry_price),
+                    "shares": str(row.shares),
+                    "amount": str(row.amount),
+                    "current_mark": str(row.current_mark) if row.current_mark is not None else None,
+                    "unrealized_pnl": str(row.unrealized_pnl),
+                    "realized_pnl": str(row.realized_pnl),
+                }
+                for row in positions
+            ],
+        }
+
+    async def execute_paper_signal(self, signal_id: int) -> dict[str, object]:
+        return await PaperLifecycle(self.sessions, self.settings).execute_signal(signal_id)
+
+    async def settle_paper_position(
+        self, position_id: int, evidence: SettlementEvidence | dict[str, object]
+    ) -> dict[str, object]:
+        normalized = (
+            evidence
+            if isinstance(evidence, SettlementEvidence)
+            else SettlementEvidence(
+                contract_id=_as_int_required(evidence["contract_id"]),
+                source=str(evidence["source"]),
+                observed_at=_as_datetime(evidence["observed_at"]),
+                retrieved_at=_as_datetime(evidence["retrieved_at"]),
+                outcome_label=str(evidence["outcome_label"]),
+                raw_response_hash=str(evidence["raw_response_hash"]),
+                normalized_values=_as_mapping(evidence.get("normalized_values", {})),
+                provider_version=(
+                    str(evidence["provider_version"])
+                    if evidence.get("provider_version") is not None
+                    else None
+                ),
+                quality_flags=_as_strings(evidence.get("quality_flags", ())),
+                license_metadata=_as_mapping(evidence.get("license_metadata", {})),
+            )
+        )
+        return await PaperLifecycle(self.sessions, self.settings).settle_position(
+            position_id, normalized
+        )
+
+    async def run_settlement_job(
+        self, fetcher: SettlementFetcher | None, *, now: datetime | None = None
+    ) -> dict[str, object]:
+        if fetcher is None:
+            return {
+                "status": "not_configured",
+                "settled": 0,
+                "reason": "authoritative_settlement_fetcher_missing",
+            }
+        results = await SettlementWorker(PaperLifecycle(self.sessions, self.settings)).run_due(
+            fetcher, now=now
+        )
+        return {
+            "status": "completed",
+            "settled": sum(row.get("status") == "settled" for row in results),
+            "errors": sum(row.get("status") == "error" for row in results),
+            "results": results,
         }
 
     async def reconcile_orders(self) -> dict[str, object]:
@@ -300,3 +384,31 @@ def _as_int(value: str) -> int:
 
 def _dataset_exists(dataset: str) -> bool:
     return Path(dataset).is_file()
+
+
+def _as_datetime(value: object) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ApplicationServiceError("settlement timestamps must be timezone-aware")
+    return parsed
+
+
+def _as_int_required(value: object) -> int:
+    if not isinstance(value, (str, int)):
+        raise ApplicationServiceError("settlement contract_id is invalid")
+    return int(value)
+
+
+def _as_mapping(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ApplicationServiceError("settlement metadata must be an object")
+    return {str(key): item for key, item in value.items()}
+
+
+def _as_strings(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ApplicationServiceError("settlement quality_flags must be an array")
+    return tuple(str(item) for item in value)

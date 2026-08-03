@@ -13,6 +13,8 @@ ALLOWED_TOOLS = (
     "run_backtest",
     "provider_health",
     "portfolio_status",
+    "execute_paper_signal",
+    "settle_paper_position",
     "reconcile_orders",
     "pause_execution",
     "resume_execution",

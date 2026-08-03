@@ -29,6 +29,7 @@ from app.services.crypto_pipeline import CryptoPaperPipeline
 from app.services.execution_control import ExecutionControl
 from app.services.forecast import OpenMeteoProvider
 from app.services.http import CircuitBreaker, ResilientHttpClient
+from app.services.paper import SettlementFetcher
 from app.services.polymarket import PolymarketClient
 from app.services.provider_health import ProviderHealthMonitor
 from app.services.rules import load_market_overrides, load_station_registry
@@ -37,7 +38,11 @@ from app.services.websocket import MarketWebSocket
 from app.worker import scan_once
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    settlement_fetcher: SettlementFetcher | None = None,
+) -> FastAPI:
     resolved = settings or Settings()
 
     @asynccontextmanager
@@ -135,6 +140,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await app.state.services.scan_markets(markets, now=datetime.now(UTC))
             return "completed"
 
+        async def scheduled_settlement() -> dict[str, object]:
+            services = cast(ApplicationServices, app.state.services)
+            return await services.run_settlement_job(settlement_fetcher, now=datetime.now(UTC))
+
         async def store_websocket_book(book: OrderBook) -> None:
             async with sessions() as session:
                 outcome = await session.scalar(
@@ -196,6 +205,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         app.state.run_scan = scheduled_scan
         app.state.run_crypto_scan = scheduled_crypto_scan
+        app.state.run_settlement = scheduled_settlement
 
         scheduler: AsyncIOScheduler | None = None
         websocket_task: asyncio.Task[None] | None = None
@@ -212,6 +222,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 scheduled_crypto_scan,
                 "interval",
                 seconds=min(resolved.polymarket_poll_seconds, resolved.observation_poll_seconds),
+                max_instances=1,
+                coalesce=True,
+            )
+            scheduler.add_job(
+                scheduled_settlement,
+                "interval",
+                seconds=resolved.observation_poll_seconds,
                 max_instances=1,
                 coalesce=True,
             )

@@ -290,32 +290,68 @@ class RejectedSignal(Base):
 
 class PaperPosition(Base):
     __tablename__ = "paper_positions"
-    __table_args__ = (Index("ix_paper_positions_status", "status"),)
+    __table_args__ = (
+        Index("ix_paper_positions_status", "status"),
+        CheckConstraint("entry_price > 0 AND entry_price <= 1", name="ck_paper_position_price"),
+        CheckConstraint("shares > 0", name="ck_paper_position_shares"),
+        CheckConstraint("amount > 0", name="ck_paper_position_amount"),
+        CheckConstraint("fees >= 0", name="ck_paper_position_fees"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"), unique=True)
-    market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), index=True)
-    outcome_id: Mapped[int] = mapped_column(ForeignKey("outcomes.id"))
+    execution_order_id: Mapped[int | None] = mapped_column(
+        ForeignKey("execution_orders.id", ondelete="RESTRICT"), unique=True
+    )
+    market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id"), index=True)
+    outcome_id: Mapped[int | None] = mapped_column(ForeignKey("outcomes.id"))
     entered_at: Mapped[datetime] = mapped_column(UTCDateTime())
     entry_price: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     amount: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     shares: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     fees: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     status: Mapped[str] = mapped_column(String(24), default="open")
+    current_mark: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
+    unrealized_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 8), default=Decimal("0"))
+    realized_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 8), default=Decimal("0"))
     signal_data: Mapped[dict[str, object]] = mapped_column(JSON)
 
 
 class PaperSettlement(Base):
     __tablename__ = "paper_settlements"
+    __table_args__ = (CheckConstraint("payout >= 0", name="ck_paper_settlement_payout"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     position_id: Mapped[int] = mapped_column(ForeignKey("paper_positions.id"), unique=True)
+    evidence_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evidence_snapshots.id", ondelete="RESTRICT"), unique=True
+    )
+    outcome_label: Mapped[str | None] = mapped_column(String(16))
     settled_at: Mapped[datetime] = mapped_column(UTCDateTime())
     won: Mapped[bool] = mapped_column(Boolean)
     payout: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     realized_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     brier_score: Mapped[float] = mapped_column(Float)
     resolution_data: Mapped[dict[str, object]] = mapped_column(JSON)
+
+
+class PaperExecutionDecision(Base):
+    """Immutable, idempotent approval or rejection for one accepted signal."""
+
+    __tablename__ = "paper_execution_decisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    signal_id: Mapped[int] = mapped_column(
+        ForeignKey("signals.id", ondelete="CASCADE"), unique=True
+    )
+    approved: Mapped[bool] = mapped_column(Boolean)
+    reasons: Mapped[list[str]] = mapped_column(JSON)
+    requested_shares: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    approved_shares: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    balance_before: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    exposure_before: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    daily_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class ProviderError(Base):
@@ -508,6 +544,9 @@ class CalibrationMetric(Base):
     prediction_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("prediction_runs.id", ondelete="SET NULL")
     )
+    settlement_id: Mapped[int | None] = mapped_column(
+        ForeignKey("paper_settlements.id", ondelete="CASCADE"), unique=True
+    )
     model_name: Mapped[str] = mapped_column(String(120))
     window_start: Mapped[datetime] = mapped_column(UTCDateTime())
     window_end: Mapped[datetime] = mapped_column(UTCDateTime())
@@ -533,14 +572,22 @@ class ResearchDocument(Base):
 
 class ExecutionOrder(Base):
     __tablename__ = "execution_orders"
-    __table_args__ = (Index("ix_execution_orders_status_created", "status", "created_at"),)
+    __table_args__ = (
+        Index("ix_execution_orders_status_created", "status", "created_at"),
+        CheckConstraint("price > 0 AND price <= 1", name="ck_execution_order_price"),
+        CheckConstraint("size > 0", name="ck_execution_order_size"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))
     outcome_id: Mapped[int | None] = mapped_column(ForeignKey("outcomes.id", ondelete="SET NULL"))
+    signal_id: Mapped[int | None] = mapped_column(
+        ForeignKey("signals.id", ondelete="SET NULL"), unique=True
+    )
     mode: Mapped[str] = mapped_column(String(16), default="paper", index=True)
     provider: Mapped[str] = mapped_column(String(80))
     client_order_id: Mapped[str] = mapped_column(String(120), unique=True)
+    intent_fingerprint: Mapped[str | None] = mapped_column(String(128), unique=True)
     provider_order_id: Mapped[str | None] = mapped_column(String(160), unique=True)
     side: Mapped[str] = mapped_column(String(8))
     price: Mapped[Decimal] = mapped_column(Numeric(18, 8))
@@ -555,7 +602,12 @@ class ExecutionOrder(Base):
 
 class ExecutionFill(Base):
     __tablename__ = "execution_fills"
-    __table_args__ = (Index("ix_execution_fills_order_filled", "execution_order_id", "filled_at"),)
+    __table_args__ = (
+        Index("ix_execution_fills_order_filled", "execution_order_id", "filled_at"),
+        CheckConstraint("price > 0 AND price <= 1", name="ck_execution_fill_price"),
+        CheckConstraint("size > 0", name="ck_execution_fill_size"),
+        CheckConstraint("fee >= 0", name="ck_execution_fill_fee"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     execution_order_id: Mapped[int] = mapped_column(

@@ -32,6 +32,7 @@ from app.services.crypto_probability import (
     ProbabilityEstimate,
     estimate_crypto_probability,
 )
+from app.services.paper import PaperLifecycle
 
 _MAX_HORIZON = 24 * 31
 _PUBLIC_SOURCES = {"coinbase", "binance", "kraken"}
@@ -455,9 +456,11 @@ class CryptoPaperPipeline:
         policy: dict[str, str],
     ) -> dict[str, object]:
         fingerprint = _fingerprint({"kind": "crypto_signal", **fingerprint_seed})
+        signal_id: int
         async with self.sessions() as session:
             existing = await session.scalar(select(Signal).where(Signal.fingerprint == fingerprint))
             if existing is None:
+                existing_id: int | None = None
                 signal = Signal(
                     contract_id=contract.id,
                     prediction_run_id=prediction.id,
@@ -485,9 +488,13 @@ class CryptoPaperPipeline:
                     )
                     if existing is None:
                         raise
+                    existing_id = existing.id
                 await session.commit()
+                signal_id = existing_id if existing_id is not None else signal.id
             else:
+                signal_id = existing.id
                 await session.rollback()
+        paper = await PaperLifecycle(self.sessions, self.settings).execute_signal(signal_id)
         return {
             "market_id": market.market_id,
             "status": "accepted",
@@ -498,6 +505,7 @@ class CryptoPaperPipeline:
             "raw_edge": str(candidate["raw_edge"]),
             "usable_edge": str(candidate["usable_edge"]),
             "fingerprint": fingerprint,
+            "paper": paper,
         }
 
     async def _reject_signal(
