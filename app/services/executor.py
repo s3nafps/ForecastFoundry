@@ -163,7 +163,14 @@ class Executor:
                 occurred_at=datetime.now(UTC),
             )
         )
-        return status == order.status
+        matched = status == expected_status
+        if not matched:
+            await ExecutionControl(self.session).set_paused(
+                True,
+                actor="executor",
+                reason="provider order reconciliation mismatch",
+            )
+        return matched
 
 
 async def _allow_paper() -> bool:
