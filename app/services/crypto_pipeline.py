@@ -5,13 +5,13 @@ import json
 from datetime import UTC, datetime
 from typing import cast
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domains.base import MarketInput
 from app.domains.crypto import CryptoContract
 from app.domains.registry import DomainRegistry
-from app.models import DomainContract, EvidenceSnapshot, PredictionFeature, PredictionRun
+from app.models import EvidenceSnapshot, PredictionFeature, PredictionRun
+from app.services.contracts import persist_domain_contract
 from app.services.crypto_data import CryptoMarketDataClient
 from app.services.crypto_probability import Comparison, estimate_crypto_probability
 
@@ -26,7 +26,7 @@ class CryptoPaperPipeline:
     ) -> None:
         self.sessions = sessions
         self.data = data
-        self.registry = registry or DomainRegistry(strict_weather=True)
+        self.registry = registry or DomainRegistry()
 
     async def run(
         self,
@@ -39,6 +39,9 @@ class CryptoPaperPipeline:
         captured_at = now or datetime.now(UTC)
         route = self.registry.route(market)
         if not route.accepted or not isinstance(route.contract, CryptoContract):
+            async with self.sessions() as session:
+                await persist_domain_contract(session, market, route)
+                await session.commit()
             return {
                 "market_id": market.market_id,
                 "status": "rejected",
@@ -46,6 +49,12 @@ class CryptoPaperPipeline:
             }
         contract = route.contract
         if contract.source not in {"coinbase", "binance", "kraken"}:
+            rejected_route = route.model_copy(
+                update={"accepted": False, "reasons": ("unsupported_public_source",)}
+            )
+            async with self.sessions() as session:
+                await persist_domain_contract(session, market, rejected_route)
+                await session.commit()
             return {
                 "market_id": market.market_id,
                 "status": "rejected",
@@ -68,13 +77,6 @@ class CryptoPaperPipeline:
             samples=samples,
         )
         contract_payload = contract.model_dump(mode="json")
-        contract_hash = hashlib.sha256(
-            json.dumps(
-                {"market_id": market.market_id, "contract": contract_payload},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
         evidence_payload = {
             "market_id": market.market_id,
             "source": series.source,
@@ -92,23 +94,7 @@ class CryptoPaperPipeline:
             ).encode()
         ).hexdigest()
         async with self.sessions() as session:
-            domain_contract = await session.scalar(
-                select(DomainContract).where(DomainContract.fingerprint == contract_hash)
-            )
-            if domain_contract is None:
-                domain_contract = DomainContract(
-                    market_external_id=market.market_id,
-                    domain="crypto",
-                    accepted=True,
-                    resolution_source=contract.resolution_source,
-                    expiry=contract.expiry,
-                    contract_data=contract_payload,
-                    rejection_reasons=[],
-                    provenance=contract.provenance,
-                    fingerprint=contract_hash,
-                )
-                session.add(domain_contract)
-                await session.flush()
+            domain_contract = await persist_domain_contract(session, market, route)
             evidence = EvidenceSnapshot(
                 provider=series.source,
                 provider_version="public-candles-v1",

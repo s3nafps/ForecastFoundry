@@ -8,9 +8,12 @@ class DomainRegistry:
         self,
         plugins: tuple[DomainPlugin, ...] | None = None,
         *,
-        strict_weather: bool = False,
+        allow_legacy_unresolved_weather: bool = False,
     ) -> None:
-        self._plugins = plugins or (WeatherPlugin(strict=strict_weather), CryptoPlugin())
+        self._plugins = plugins or (
+            WeatherPlugin(allow_legacy_unresolved=allow_legacy_unresolved_weather),
+            CryptoPlugin(),
+        )
 
     def route(self, market: MarketInput) -> DomainRoute:
         matches = tuple(plugin for plugin in self._plugins if plugin.matches(market))

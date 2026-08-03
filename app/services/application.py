@@ -1,7 +1,5 @@
 """Application use-cases shared by HTTP, CLI, MCP, scheduler, and tests."""
 
-import hashlib
-import json
 import os
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime
@@ -26,17 +24,13 @@ from app.models import (
     ReconciliationEvent,
 )
 from app.providers.registry import ProviderRegistry, ProviderSecretError
+from app.services.contracts import persist_domain_contract
 from app.services.execution_control import ControlSnapshot, ExecutionControl
 from app.services.operator_auth import OperatorAuth, OperatorAuthError
 
 
 class ApplicationServiceError(RuntimeError):
     pass
-
-
-def _fingerprint(value: object) -> str:
-    encoded = json.dumps(value, sort_keys=True, default=str, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 class ApplicationServices:
@@ -52,7 +46,7 @@ class ApplicationServices:
     ) -> None:
         self.sessions = sessions
         self.settings = settings
-        self.registry = registry or DomainRegistry(strict_weather=True)
+        self.registry = registry or DomainRegistry()
         self.providers = providers or ProviderRegistry.default()
         self.crypto_pipeline = crypto_pipeline
         self.health_monitor = health_monitor
@@ -79,36 +73,7 @@ class ApplicationServices:
                 )
                 route = self.registry.route(market)
                 contract = route.contract
-                fingerprint = _fingerprint(
-                    {
-                        "market_id": market.market_id,
-                        "domain": contract.domain if contract else route.domain,
-                        "contract": contract.model_dump(mode="json")
-                        if contract
-                        else {"title": market.title, "description": market.description},
-                    }
-                )
-                existing = await session.scalar(
-                    select(DomainContract).where(DomainContract.fingerprint == fingerprint)
-                )
-                if existing is None:
-                    session.add(
-                        DomainContract(
-                            market_external_id=market.market_id,
-                            domain=contract.domain if contract else (route.domain or "unknown"),
-                            accepted=route.accepted,
-                            resolution_source=contract.resolution_source if contract else None,
-                            expiry=contract.expiry if contract else None,
-                            contract_data=(
-                                contract.model_dump(mode="json")
-                                if contract
-                                else {"title": market.title, "description": market.description}
-                            ),
-                            rejection_reasons=list(route.reasons),
-                            provenance=contract.provenance if contract else {"title": "polymarket"},
-                            fingerprint=fingerprint,
-                        )
-                    )
+                await persist_domain_contract(session, market, route)
                 results.append(
                     {
                         "market_id": market.market_id,

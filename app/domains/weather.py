@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +13,12 @@ from app.services.rules import (
 
 
 class WeatherContract(NormalizedMarket):
+    event_id: str
     location_name: str
+    latitude: float
+    longitude: float
     station_id: str
+    local_date: date
     timezone: str
     measurement: str
     rounding_method: str
@@ -30,20 +35,17 @@ class WeatherPlugin:
         self,
         *,
         stations: Mapping[str, Station] | None = None,
-        strict: bool = False,
+        allow_legacy_unresolved: bool = False,
     ) -> None:
         self._stations = dict(stations or _load_default_stations())
-        self._strict = strict
+        self._allow_legacy_unresolved = allow_legacy_unresolved
 
     def matches(self, market: MarketInput) -> bool:
         text = f"{market.title} {market.description}".lower()
-        return any(
-            term in text
-            for term in ("temperature", "°c", "°f", "â°c", "â°f", "rainfall", "precipitation")
-        )
+        return any(term in text for term in ("temperature", "°c", "°f", "â°c", "â°f"))
 
     def normalize(self, market: MarketInput) -> DomainRoute:
-        if not self._strict and not market.raw_data:
+        if self._allow_legacy_unresolved and not market.raw_data:
             return DomainRoute(
                 accepted=True,
                 domain=self.name,
@@ -75,7 +77,7 @@ class WeatherPlugin:
         return DomainRoute(
             accepted=True,
             domain=self.name,
-            contract=_contract_from_normalized(market.market_id, normalized),
+            contract=_contract_from_normalized(market.market_id, normalized, event.end_date),
         )
 
 
@@ -92,17 +94,23 @@ def _event_from_market(market: MarketInput) -> GammaEvent:
     return GammaEvent.model_validate(event_payload)
 
 
-def _contract_from_normalized(market_id: str, normalized: NormalizedEvent) -> WeatherContract:
+def _contract_from_normalized(
+    market_id: str, normalized: NormalizedEvent, expiry: datetime | None
+) -> WeatherContract:
     return WeatherContract(
         market_id=market_id,
         domain="weather",
         resolution_source=normalized.resolution_source,
         time_semantics=normalized.reporting_period,
         unit_or_quote=normalized.unit.value,
-        expiry=None,
+        expiry=expiry,
         provenance=normalized.field_provenance,
+        event_id=normalized.event_id,
         location_name=normalized.location_name,
+        latitude=normalized.latitude,
+        longitude=normalized.longitude,
         station_id=normalized.station_id,
+        local_date=normalized.local_date,
         timezone=normalized.timezone,
         measurement=normalized.measurement,
         rounding_method=normalized.rounding_method.value,
