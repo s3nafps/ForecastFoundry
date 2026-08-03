@@ -73,3 +73,30 @@ def test_execution_control_request_ids_are_unique(tmp_path: Path) -> None:
         "expected_revision",
         "result_revision",
     } <= columns
+
+
+def test_idempotency_downgrade_preserves_control_and_audit_data(tmp_path: Path) -> None:
+    database_path = tmp_path / "control-downgrade.db"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path.as_posix()}")
+    command.upgrade(config, "head")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO kill_switch_events "
+            "(active, actor, reason, triggered_at, metadata_json, request_id, revision) "
+            "VALUES (1, 'test', 'preserve', CURRENT_TIMESTAMP, '{}', 'preserve-1', 1)"
+        )
+    command.downgrade(config, "0004")
+
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        state_rows = connection.execute("SELECT COUNT(*) FROM execution_control_state").fetchone()
+        audit_rows = connection.execute("SELECT COUNT(*) FROM kill_switch_events").fetchone()
+    assert "execution_control_requests" not in tables
+    assert state_rows == (1,)
+    assert audit_rows == (1,)

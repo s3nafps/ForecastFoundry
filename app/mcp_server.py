@@ -1,13 +1,16 @@
 """Client-neutral MCP adapter over the shared application services."""
 
 import asyncio
+import json
 import os
 import sys
 from collections.abc import Awaitable, Callable
+from functools import wraps
 from typing import Any
 from weakref import WeakKeyDictionary
 
 from mcp.server.mcpserver import MCPServer
+from mcp.types import CallToolResult, TextContent
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app import COMPATIBILITY_VERSION, PRODUCT_NAME
@@ -17,6 +20,7 @@ from app.domains.base import MarketInput
 from app.mcp_policy import require_operator
 from app.models import Base
 from app.services.application import ApplicationServices
+from app.services.execution_control import ExecutionControlConflict
 
 ALLOWED_TOOLS = (
     "list_supported_domains",
@@ -132,6 +136,24 @@ _HANDLERS: WeakKeyDictionary[MCPServer, dict[str, Callable[..., Awaitable[dict[s
 )
 
 
+def _machine_readable_control_conflicts(
+    handler: Callable[..., Awaitable[dict[str, object]]],
+) -> Callable[..., Awaitable[object]]:
+    @wraps(handler)
+    async def wrapped(**arguments: Any) -> object:
+        try:
+            return await handler(**arguments)
+        except ExecutionControlConflict as exc:
+            payload = exc.as_dict()
+            return CallToolResult(
+                content=[TextContent(text=json.dumps(payload, sort_keys=True))],
+                structured_content=payload,
+                is_error=True,
+            )
+
+    return wrapped
+
+
 def create_server(services: ApplicationServices | None = None) -> MCPServer:
     facade = MCPFacade(services)
     server = MCPServer(name=PRODUCT_NAME, version=COMPATIBILITY_VERSION)
@@ -139,7 +161,12 @@ def create_server(services: ApplicationServices | None = None) -> MCPServer:
         name: getattr(facade, name) for name in ALLOWED_TOOLS
     }
     for name, handler in handlers.items():
-        server.add_tool(handler, name=name, description=f"ForecastFoundry {name}")
+        registered = (
+            _machine_readable_control_conflicts(handler)
+            if name in {"pause_execution", "resume_execution"}
+            else handler
+        )
+        server.add_tool(registered, name=name, description=f"ForecastFoundry {name}")
     _HANDLERS[server] = handlers
     return server
 

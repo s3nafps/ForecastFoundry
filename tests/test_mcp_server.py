@@ -65,6 +65,31 @@ def test_mcp_raises_typed_idempotency_conflict(tmp_path, monkeypatch: pytest.Mon
     assert raised.value.as_dict()["type"] == "idempotency_conflict"
 
 
+@pytest.mark.asyncio
+async def test_registered_mcp_tool_returns_machine_readable_idempotency_conflict(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FORECASTFOUNDRY_MCP_OPERATOR_TOKEN", "operator-secret")
+    monkeypatch.setenv(
+        "FORECASTFOUNDRY_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'mcp-transport.db'}"
+    )
+    server = create_server()
+    await server.call_tool(
+        "resume_execution", {"reason": "operator test", "request_id": "mcp-transport-1"}
+    )
+
+    conflict = await server.call_tool(
+        "pause_execution", {"reason": "operator test", "request_id": "mcp-transport-1"}
+    )
+
+    assert conflict.is_error is True
+    assert conflict.structured_content == {
+        "type": "idempotency_conflict",
+        "message": "request ID is already bound to a different execution control request",
+        "request_id": "mcp-transport-1",
+    }
+
+
 def test_mcp_stdio_lists_tools_without_executor_secrets() -> None:
     requests = [
         {

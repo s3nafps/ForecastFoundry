@@ -163,6 +163,45 @@ async def test_concurrent_identical_requests_share_one_result(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_fresh_database_concurrent_identical_requests_share_one_result(
+    tmp_path: Path,
+) -> None:
+    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'fresh-concurrent-retry.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = make_session_factory(engine)
+    first_checks = asyncio.Barrier(2)
+
+    class SynchronizedExecutionControl(ExecutionControl):
+        initial_check = True
+
+        async def _retry(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            result = await super()._retry(*args, **kwargs)
+            if self.initial_check:
+                self.initial_check = False
+                await first_checks.wait()
+            return result
+
+    async def transition() -> object:
+        async with sessions() as session:
+            result = await SynchronizedExecutionControl(session).set_paused(
+                False,
+                actor="test",
+                reason="resume",
+                request_id="fresh-concurrent-retry",
+                expected_revision=0,
+            )
+            await session.commit()
+            return result
+
+    first, second = await asyncio.gather(transition(), transition())
+    assert first == second
+    async with sessions() as session:
+        assert len((await session.scalars(select(KillSwitchEvent))).all()) == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_concurrent_requests_allow_one_transition_per_revision(tmp_path: Path) -> None:
     engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'concurrent.db'}")
     async with engine.begin() as connection:
@@ -200,7 +239,8 @@ async def test_concurrent_requests_allow_one_transition_per_revision(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_retry_returns_original_result_across_fresh_sessions(tmp_path: Path) -> None:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'persistent-idempotency.db'}")
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'persistent-idempotency.db'}"
+    engine = make_engine(database_url)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     sessions = make_session_factory(engine)
@@ -214,6 +254,9 @@ async def test_retry_returns_original_result_across_fresh_sessions(tmp_path: Pat
             True, actor="test", reason="pause", request_id="persisted-2", expected_revision=1
         )
         await session.commit()
+    await engine.dispose()
+    engine = make_engine(database_url)
+    sessions = make_session_factory(engine)
     async with sessions() as session:
         retry = await ExecutionControl(session).set_paused(
             False, actor="test", reason="resume", request_id="persisted-1", expected_revision=0

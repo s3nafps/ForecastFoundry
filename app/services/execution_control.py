@@ -171,6 +171,16 @@ class ExecutionControl:
         if retry is not None:
             return retry
         row = await self._row()
+        retry = await self._retry(
+            request_id,
+            paused=paused,
+            actor=actor,
+            operation=operation,
+            reason=reason,
+            expected_revision=expected_revision,
+        )
+        if retry is not None:
+            return retry
         if expected_revision is not None and expected_revision != row.revision:
             raise RevisionConflict("execution control revision conflict", request_id=request_id)
         previous = row.paused
