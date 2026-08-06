@@ -306,7 +306,11 @@ class ApplicationServices:
                 )
             ).all()
             position_by_id = {row.id: row for row in positions}
-            signal_ids = [position_by_id[row.position_id].signal_id for row in settlements]
+            signal_ids: list[int] = []
+            for row in settlements:
+                position = position_by_id.get(row.position_id)
+                if position is not None:
+                    signal_ids.append(position.signal_id)
             signals = (
                 await session.scalars(
                     select(Signal).where(Signal.id.in_(signal_ids))

@@ -1,9 +1,13 @@
 from decimal import Decimal
 
+from app.database import make_engine, make_session_factory
+from app.models import ApplicationSetting, Base
 from app.services.model_weights import (
+    WEIGHTS_KEY,
     ModelSample,
     compute_weights,
     extract_samples,
+    load_model_weights,
     model_brier,
 )
 
@@ -69,3 +73,37 @@ def test_compute_weights_promotes_better_model() -> None:
     assert weights is not None
     assert weights["ecmwf_ifs025"] > weights["gfs_seamless"]
     assert abs(sum(weights.values()) - 1.0) < 1e-9
+
+
+def test_compute_weights_handles_perfect_model() -> None:
+    samples = _samples(
+        {
+            "A": [("1.0", True)] * 30,
+            "B": [("0.5", True), ("0.5", False)] * 15,
+        }
+    )
+
+    weights = compute_weights(samples, min_samples=30, min_improvement=Decimal("0.05"))
+
+    assert weights == {"A": 1.0, "B": 0.0}
+
+
+def test_compute_weights_returns_none_for_perfect_model_below_min_samples() -> None:
+    samples = _samples({"A": [("1.0", True)] * 5})
+
+    assert compute_weights(samples, min_samples=30, min_improvement=Decimal("0.05")) is None
+
+
+async def test_load_weights_falls_back_on_corrupt_stored_value() -> None:
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = make_session_factory(engine)
+    async with sessions() as session:
+        session.add(ApplicationSetting(key=WEIGHTS_KEY, value={"gfs_seamless": "not-a-number"}))
+        await session.commit()
+
+    async with sessions() as session:
+        weights = await load_model_weights(session)
+
+    assert weights == {}

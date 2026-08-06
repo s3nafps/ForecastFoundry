@@ -55,6 +55,11 @@ def compute_weights(
     if not samples or any(len(entries) < min_samples for entries in samples.values()):
         return None
     brier = model_brier(samples)
+    perfect = next((model for model, score in brier.items() if score == 0), None)
+    if perfect is not None:
+        # A Brier of exactly 0 means the model is perfectly calibrated; give it all
+        # the weight so the blend degenerates to that model (weights still sum to 1).
+        return {model: 1.0 if model == perfect else 0.0 for model in brier}
     baseline = sum(brier.values()) / Decimal(len(brier))
     inverse = {model: Decimal("1") / score for model, score in brier.items()}
     total = sum(inverse.values())
@@ -71,7 +76,13 @@ async def load_model_weights(session: AsyncSession) -> dict[str, float]:
     setting = await session.get(ApplicationSetting, WEIGHTS_KEY)
     if setting is None or not isinstance(setting.value, Mapping):
         return {}
-    return {str(model): float(weight) for model, weight in setting.value.items()}
+    weights: dict[str, float] = {}
+    for model, weight in setting.value.items():
+        try:
+            weights[str(model)] = float(weight)
+        except (TypeError, ValueError):
+            continue
+    return weights
 
 
 async def store_model_weights(
