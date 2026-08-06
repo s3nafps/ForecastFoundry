@@ -27,3 +27,9 @@ def test_cli_returns_typed_idempotency_conflict(tmp_path, monkeypatch, capsys) -
     )
     error = json.loads(capsys.readouterr().out)
     assert error["error_type"] == "idempotency_conflict"
+
+
+def test_calibrate_command_is_registered() -> None:
+    from app.cli import build_parser
+
+    assert "calibrate" in build_parser().format_help()

@@ -3,6 +3,7 @@
 import os
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 from sqlalchemy import select
@@ -24,10 +25,17 @@ from app.models import (
     PredictionFeature,
     PredictionRun,
     ReconciliationEvent,
+    Signal,
 )
 from app.providers.registry import ProviderRegistry, ProviderSecretError
 from app.services.contracts import persist_domain_contract
 from app.services.execution_control import ControlSnapshot, ExecutionControl
+from app.services.model_weights import (
+    WEIGHTS_KEY,
+    compute_weights,
+    extract_samples,
+    store_model_weights,
+)
 from app.services.operator_auth import OperatorAuth, OperatorAuthError
 from app.services.paper import (
     PaperLifecycle,
@@ -272,12 +280,63 @@ class ApplicationServices:
         results = await SettlementWorker(PaperLifecycle(self.sessions, self.settings)).run_due(
             fetcher, now=now
         )
+        try:
+            calibration = await self.run_calibration()
+        except Exception:
+            calibration = {"status": "calibration_error", "promoted": False}
         return {
             "status": "completed",
             "settled": sum(row.get("status") == "settled" for row in results),
             "errors": sum(row.get("status") == "error" for row in results),
             "results": results,
+            "calibration": calibration,
         }
+
+    async def run_calibration(
+        self, *, min_samples: int = 30, min_improvement: Decimal = Decimal("0.05")
+    ) -> dict[str, object]:
+        async with self.sessions() as session:
+            settlements = (await session.scalars(select(PaperSettlement))).all()
+            if not settlements:
+                return {"status": "no_settlements", "promoted": False}
+            position_ids = [row.position_id for row in settlements]
+            positions = (
+                await session.scalars(
+                    select(PaperPosition).where(PaperPosition.id.in_(position_ids))
+                )
+            ).all()
+            position_by_id = {row.id: row for row in positions}
+            signal_ids = [position_by_id[row.position_id].signal_id for row in settlements]
+            signals = (
+                await session.scalars(
+                    select(Signal).where(Signal.id.in_(signal_ids))
+                )
+            ).all()
+            signal_by_id = {row.id: row for row in signals}
+            pairs: list[tuple[dict[str, object], bool]] = []
+            for settlement in settlements:
+                position = position_by_id.get(settlement.position_id)
+                if position is None:
+                    continue
+                signal = signal_by_id.get(position.signal_id)
+                if signal is None:
+                    continue
+                pairs.append((signal.signal_data, settlement.won))
+            samples = extract_samples(pairs)
+            weights = compute_weights(
+                samples, min_samples=min_samples, min_improvement=min_improvement
+            )
+            if weights is None:
+                return {"status": "not_promoted", "promoted": False, "samples": len(samples)}
+            await store_model_weights(session, weights)
+            await session.commit()
+            return {
+                "status": "promoted",
+                "promoted": True,
+                "key": WEIGHTS_KEY,
+                "weights": weights,
+                "samples": sum(len(entries) for entries in samples.values()),
+            }
 
     async def reconcile_orders(self) -> dict[str, object]:
         async with self.sessions() as session:

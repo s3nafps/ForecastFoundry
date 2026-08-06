@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 from collections.abc import Sequence
+from decimal import Decimal
 from typing import Any
 
 from app import PRODUCT_NAME
@@ -29,6 +30,13 @@ def build_parser() -> argparse.ArgumentParser:
     backtest = subparsers.add_parser("backtest", help="run a chronological paper backtest")
     backtest.add_argument("--dataset")
     backtest.add_argument("--json", action="store_true")
+
+    calibrate = subparsers.add_parser(
+        "calibrate", help="promote calibration-based model weights if the gate passes"
+    )
+    calibrate.add_argument("--min-samples", type=int, default=30)
+    calibrate.add_argument("--min-improvement", type=float, default=0.05)
+    calibrate.add_argument("--json", action="store_true")
 
     status = subparsers.add_parser("status", help="show persisted execution and paper status")
     status.add_argument("--json", action="store_true")
@@ -94,6 +102,11 @@ async def _execute(args: argparse.Namespace) -> dict[str, object]:
             if not args.dataset:
                 raise ApplicationServiceError("--dataset is required for backtest")
             return await services.run_backtest(args.dataset)
+        if args.command == "calibrate":
+            return await services.run_calibration(
+                min_samples=args.min_samples,
+                min_improvement=Decimal(str(args.min_improvement)),
+            )
         if args.command in {"status", "portfolio"}:
             return await services.portfolio_status()
         if args.command == "evidence":

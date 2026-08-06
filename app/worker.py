@@ -40,6 +40,7 @@ from app.schemas import (
 )
 from app.services.contracts import persist_domain_contract
 from app.services.forecast import ForecastProvider
+from app.services.model_weights import load_model_weights
 from app.services.observations import (
     ObservedHour,
     apply_observations_to_points,
@@ -219,6 +220,8 @@ async def scan_once(
         return
 
     registry = DomainRegistry(plugins=(WeatherPlugin(stations=stations, overrides=overrides),))
+    async with sessions() as session:
+        weights = await load_model_weights(session)
     for source_event in events:
         domain_route = registry.route(
             MarketInput(
@@ -345,7 +348,7 @@ async def scan_once(
                 normalized.buckets,
                 rounding_method=normalized.rounding_method,
                 unit=normalized.unit,
-                model_weights={},
+                model_weights=weights,
             )
 
             for market, yes, source_market in markets.values():
