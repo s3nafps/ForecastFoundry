@@ -149,3 +149,33 @@ def test_rejects_non_positive_threshold_during_normalization() -> None:
 
     assert result.accepted is False
     assert "threshold_non_positive" in result.reasons
+
+
+def test_close_alias_is_persisted_as_canonical_closing_price() -> None:
+    result = parse_crypto_market(
+        MarketInput(
+            market_id="close-alias",
+            title="Will BTC be above $100 at 2026-09-01 00:00 UTC?",
+            description="Use Coinbase BTC-USD close, rounded to nearest dollar.",
+        )
+    )
+
+    assert result.accepted is True
+    assert result.contract is not None
+    assert result.contract.price_definition == "closing price"
+
+
+def test_unsupported_price_definitions_reject_before_contract_creation() -> None:
+    results = tuple(
+        parse_crypto_market(
+            MarketInput(
+                market_id=f"unsupported-price-{index}",
+                title="Will BTC be above $100 at 2026-09-01 00:00 UTC?",
+                description=f"Use Coinbase BTC-USD {definition}, rounded to nearest dollar.",
+            )
+        )
+        for index, definition in enumerate(("last price", "index level", "spot price"))
+    )
+
+    assert all(result.accepted is False and result.contract is None for result in results)
+    assert all("price_definition_unsupported" in result.reasons for result in results)

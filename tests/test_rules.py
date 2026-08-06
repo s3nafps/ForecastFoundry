@@ -145,3 +145,11 @@ def test_rejects_unknown_override_fields(tmp_path: Path) -> None:
 
     with pytest.raises(RuleNormalizationError, match="unknown override"):
         load_market_overrides(path)
+
+
+def test_canonical_bucket_label_strips_mojibake_and_collapses_whitespace() -> None:
+    from app.services.rules import canonical_bucket_label
+
+    assert canonical_bucket_label("24Â°C or higher") == "24°C or higher"
+    assert canonical_bucket_label(" 24°C   or   higher ") == "24°C or higher"
+    assert canonical_bucket_label("24°C or higher") == "24°C or higher"

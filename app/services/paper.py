@@ -5,7 +5,7 @@ import json
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import cast
 from zoneinfo import ZoneInfo
@@ -38,6 +38,7 @@ from app.services.crypto_data import (
 from app.services.execution_control import ExecutionControl
 from app.services.probability import round_temperature
 from app.services.risk import RiskLimits, size_order
+from app.services.rules import canonical_bucket_label
 
 
 class PaperTradingError(ValueError):
@@ -897,14 +898,16 @@ def _derive_settlement_outcome(
         raise PaperTradingError("settlement source mismatch")
     if contract.expiry is None or evidence.observed_at != contract.expiry:
         raise PaperTradingError("settlement observation timestamp mismatch")
-    if (signal.outcome_label or "").upper() not in {"YES", "NO"}:
-        raise PaperTradingError("signal outcome mapping is invalid")
     if contract.domain == "weather":
         return _derive_weather_settlement_outcome(contract, signal, evidence)
     if contract.domain != "crypto":
         raise PaperTradingError(f"settlement domain unsupported: {contract.domain}")
+    if (signal.outcome_label or "").upper() not in {"YES", "NO"}:
+        raise PaperTradingError("signal outcome mapping is invalid")
     data = contract.contract_data
     values = evidence.normalized_values
+    if str(data.get("price_definition", "")).strip().lower() != "closing price":
+        raise PaperTradingError("settlement price definition unsupported")
     if evidence.raw_payload is None:
         raise PaperTradingError("settlement raw payload is required")
     if not re.fullmatch(r"[0-9a-f]{64}", evidence.raw_response_hash):
@@ -990,6 +993,8 @@ def _derive_weather_settlement_outcome(
         raise PaperTradingError("settlement raw payload hash mismatch")
     if not isinstance(evidence.raw_payload, dict):
         raise PaperTradingError("weather settlement payload is invalid")
+    if evidence.raw_payload.get("provider") != "aviation_weather":
+        raise PaperTradingError("weather settlement provider unsupported")
     rows = evidence.raw_payload.get("observations")
     if not isinstance(rows, list) or not rows:
         raise PaperTradingError("weather settlement observations missing")
@@ -997,27 +1002,58 @@ def _derive_weather_settlement_outcome(
     source = str(contract.resolution_source or "")
     timezone = str(data.get("timezone", ""))
     local_date = str(data.get("local_date", ""))
-    temperatures: list[float] = []
+    if str(data.get("measurement", "")) != "daily_max_temperature":
+        raise PaperTradingError("weather settlement measurement unsupported")
+    if str(data.get("reporting_period", "")) != "local_calendar_day":
+        raise PaperTradingError("weather settlement reporting period unsupported")
+    unit = str(data.get("unit_or_quote", data.get("unit", ""))).lower()
+    if unit not in {"celsius", "fahrenheit"}:
+        raise PaperTradingError("weather settlement unit unsupported")
+    parsed: list[tuple[datetime, float]] = []
     for row in rows:
         if not isinstance(row, dict):
             raise PaperTradingError("weather settlement observation invalid")
         try:
-            observed = datetime.fromisoformat(str(row["observed_at"]).replace("Z", "+00:00"))
-            temperature = float(row["air_temperature"])
+            observed = datetime.fromtimestamp(float(row["obsTime"]), UTC)
+            temperature_celsius = float(row["temp"])
         except (KeyError, TypeError, ValueError) as exc:
             raise PaperTradingError("weather settlement observation invalid") from exc
-        if observed.tzinfo is None:
-            raise PaperTradingError("weather observation timestamp is naive")
-        if row.get("station_id") != station or row.get("source") != source:
+        if row.get("icaoId") != station:
             raise PaperTradingError("weather settlement station or source mismatch")
+        flags = row.get("quality_flags", [])
+        if not isinstance(flags, list) or any(
+            str(flag).lower() in {"fatal", "invalid", "missing_temperature"} for flag in flags
+        ):
+            raise PaperTradingError("weather settlement observation quality is fatal")
         if observed.astimezone(ZoneInfo(timezone)).date().isoformat() != local_date:
             raise PaperTradingError("weather observation outside reporting window")
-        temperatures.append(temperature)
-    if str(data.get("measurement", "")).lower() != "daily maximum air temperature":
-        raise PaperTradingError("weather settlement measurement unsupported")
+        temperature = (
+            temperature_celsius * 9 / 5 + 32 if unit == "fahrenheit" else temperature_celsius
+        )
+        parsed.append((observed, temperature))
+    parsed.sort(key=lambda item: item[0])
+    timestamps = [item[0] for item in parsed]
+    if len(set(timestamps)) != len(timestamps):
+        raise PaperTradingError("weather settlement observations contain duplicates")
+    zone = ZoneInfo(timezone)
+    local_day = datetime.fromisoformat(local_date).date()
+    window_start = datetime.combine(local_day, datetime.min.time(), zone).astimezone(UTC)
+    window_end = datetime.combine(
+        local_day + timedelta(days=1), datetime.min.time(), zone
+    ).astimezone(UTC)
+    if (
+        len(parsed) < 6
+        or timestamps[0] - window_start > timedelta(hours=3)
+        or window_end - timestamps[-1] > timedelta(hours=3)
+        or any(
+            current - previous > timedelta(hours=4)
+            for previous, current in zip(timestamps, timestamps[1:], strict=False)
+        )
+    ):
+        raise PaperTradingError("weather settlement observation coverage inadequate")
     try:
         rounded = round_temperature(
-            max(temperatures), RoundingMethod(str(data["rounding_method"]))
+            max(value for _, value in parsed), RoundingMethod(str(data["rounding_method"]))
         )
         raw_buckets = data["buckets"]
         if not isinstance(raw_buckets, list):
@@ -1031,16 +1067,24 @@ def _derive_weather_settlement_outcome(
     expected = signal.outcome_label
     if not expected:
         raise PaperTradingError("weather signal outcome label missing")
-    outcome = "YES" if bucket.label == expected else "NO"
+    outcome = (
+        "YES"
+        if canonical_bucket_label(str(expected)) == canonical_bucket_label(bucket.label)
+        else "NO"
+    )
     normalized = evidence.normalized_values
-    if (
-        normalized.get("station_id") != station
-        or normalized.get("source") != source
-        or normalized.get("local_date") != local_date
-        or Decimal(str(normalized.get("rounded_value"))) != Decimal(str(rounded))
-        or normalized.get("bucket_label") != bucket.label
+    if normalized.get("station_id") != station:
+        raise PaperTradingError("weather normalized station contradicts observations")
+    if normalized.get("source") != source:
+        raise PaperTradingError("weather normalized source contradicts observations")
+    if normalized.get("local_date") != local_date:
+        raise PaperTradingError("weather normalized date contradicts observations")
+    if Decimal(str(normalized.get("rounded_value"))) != Decimal(str(rounded)):
+        raise PaperTradingError("weather normalized value contradicts observations")
+    if canonical_bucket_label(str(normalized.get("bucket_label"))) != canonical_bucket_label(
+        bucket.label
     ):
-        raise PaperTradingError("weather normalized values contradict observations")
+        raise PaperTradingError("weather normalized bucket contradicts observations")
     if evidence.outcome_label is not None and evidence.outcome_label.strip().upper() != outcome:
         raise PaperTradingError("settlement claimed outcome conflicts with observation")
     return outcome

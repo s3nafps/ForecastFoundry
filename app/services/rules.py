@@ -59,8 +59,13 @@ def load_market_overrides(path: Path) -> dict[str, dict[str, object]]:
     return result
 
 
+def canonical_bucket_label(label: str) -> str:
+    """Normalize a bucket label for equality comparison (mojibake-safe)."""
+    return " ".join(label.replace("Â", "").split())
+
+
 def parse_bucket(label: str, unit: TemperatureUnit) -> Bucket:
-    cleaned = label.replace("Â", "")
+    cleaned = canonical_bucket_label(label)
     match = _BUCKET.fullmatch(cleaned)
     if not match:
         raise RuleNormalizationError(f"unsupported temperature bucket: {label}")

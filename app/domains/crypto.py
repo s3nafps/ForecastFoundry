@@ -136,7 +136,12 @@ def parse_crypto_market(market: MarketInput) -> CryptoMarketResult:
 
     price_definition = _find_price_definition(lowered)
     if not price_definition:
-        reasons.append("price_definition_missing")
+        reasons.append(
+            "price_definition_unsupported"
+            if re.search(r"\b(?:last|index|spot|market|reference)\s+(?:price|level)\b", lowered)
+            or re.search(r"\bprice\b", lowered)
+            else "price_definition_missing"
+        )
 
     rounding, rounding_increment = _parse_rounding(lowered)
     if rounding is None:
@@ -246,10 +251,11 @@ def _parse_comparison_reference(text: str) -> tuple[Decimal | None, datetime | N
 
 
 def _find_price_definition(text: str) -> str | None:
-    for phrase in ("closing price", "last price", "index level", "close"):
-        if re.search(rf"\b{phrase}\b", text):
-            return phrase
-    return None
+    supported = bool(re.search(r"\b(?:closing price|close)\b", text))
+    unsupported = bool(
+        re.search(r"\b(?:last|index|spot|market|reference)\s+(?:price|level)\b", text)
+    )
+    return "closing price" if supported and not unsupported else None
 
 
 def _parse_rounding(text: str) -> tuple[str | None, Decimal | None]:
