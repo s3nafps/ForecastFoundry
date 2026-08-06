@@ -89,7 +89,7 @@ Migration `0009_observation_blend.py` adds to `probability_estimates`:
 - `observations_used: int` default 0
 - `blend_applied: bool` default false
 
-Migration `0010_research_documents.py` creates the `research_documents` table (see Phase 3).
+No migration is required for research documents: the `research_documents` table and `ResearchDocument` model already exist from migration `0002_general_agent.py`; only ingestion, API, and dashboard are missing (see Phase 3).
 
 The alert message includes the observation summary instead of the placeholder `"not collected in temperature milestone"`.
 
@@ -134,7 +134,7 @@ New module `app/services/research.py`:
 
 - `fetch_github_issues(http, repo, *, since)`: public issue search via the shared resilient client, throttled and cached (short TTL).
 - Sanitize with the existing `sanitize_research_text`; hash the raw response with `canonical_payload_hash`.
-- Persist to a new `research_documents` table (migration 0010):
+- Persist to the existing `research_documents` table (migration 0002, model `ResearchDocument`):
 
   - `id`, `provider` (`github`), `external_id` (issue number), `title`, `body_snippet`, `url`, `author`, `published_at`, `raw_response_hash`, `sanitized_at`, `quality_flags`, `raw_data`.
 
@@ -161,7 +161,7 @@ An architectural test proves the research path is inert: after ingestion, scanni
 Extend `.github/workflows/ci.yml` with two jobs (the existing `quality` job stays):
 
 1. `docker` job: `docker build -t forecastfoundry:test .`; `docker compose config`; `docker compose up -d`; poll `/health` and `/ready`; `docker compose down`; assert the named volume is retained.
-2. `postgres` job: `postgres:16` service container; `DATABASE_URL=postgresql+asyncpg://...` `alembic upgrade head` and `alembic downgrade base`; run the full pytest suite against PostgreSQL.
+2. `postgres` job: `postgres:16` service container; `DATABASE_URL=postgresql+asyncpg://...` `alembic upgrade head` and `alembic downgrade base`; run a targeted PostgreSQL integration test (a new test skipped unless `FORECASTFOUNDRY_TEST_POSTGRES=1`). The full pytest suite is not run against PostgreSQL because most tests are bound to SQLite fixture paths.
 
 `asyncpg` is added as a dev/test extra in `pyproject.toml` (the runtime extra stays optional). The compose file already separates migration, web, scheduler, MCP, executor, and optional PostgreSQL services; CI exercises the SQLite compose profile for the Docker job and the PostgreSQL URL for the migration/test job.
 
