@@ -198,7 +198,7 @@ async def test_observation_ingest_skips_contracts_past_expiry_grace(
         market_external_id="weather-eglc-expired",
         fingerprint="weather-eglc-expired",
         expiry=now - timedelta(hours=2),
-        local_date=(now - timedelta(days=1)).date().isoformat(),
+        local_date=(now - timedelta(days=2)).date().isoformat(),
     )
 
     async with application.router.lifespan_context(application):
@@ -211,6 +211,39 @@ async def test_observation_ingest_skips_contracts_past_expiry_grace(
         async with application.state.sessions() as session:
             observations = (await session.scalars(select(Observation))).all()
     assert observations == []
+
+
+async def test_observation_ingest_ingests_past_expiry_inside_reporting_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'reporting-window.db'}"
+    engine = make_engine(database_url)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    await engine.dispose()
+    _FAKE_FETCH_CALLS.clear()
+    monkeypatch.setattr("app.main.AviationWeatherObservations", _FakeAviationWeather)
+    application = create_app(Settings(app_env="test", database_url=database_url))
+
+    now = datetime.now(UTC)
+    stale_expiry = _weather_contract(
+        market_external_id="weather-eglc-stale-expiry",
+        fingerprint="weather-eglc-stale-expiry",
+        expiry=now - timedelta(hours=2),
+        local_date=now.date().isoformat(),
+    )
+
+    async with application.router.lifespan_context(application):
+        async with application.state.sessions() as session:
+            session.add(stale_expiry)
+            await session.commit()
+        result = await application.state.run_observation_ingest()
+        assert result == {"status": "completed", "ingested": 1, "errors": 0}
+        assert _FAKE_FETCH_CALLS == [("EGLC", now.date())]
+        async with application.state.sessions() as session:
+            observations = (await session.scalars(select(Observation))).all()
+    assert len(observations) == 1
+    assert observations[0].station_id == "EGLC"
 
 
 async def test_research_api_lists_documents_ordered_and_dashboard_renders(
