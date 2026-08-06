@@ -263,11 +263,13 @@ Create `app/services/observations.py`:
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Observation
 from app.schemas import ForecastPoint
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class ObservationParseError(ValueError):
@@ -353,7 +355,12 @@ def apply_observations_to_points(
 
 
 async def load_day_observations(
-    session: AsyncSession, *, station_id: str, source: str, local_date: object
+    session: AsyncSession,
+    *,
+    station_id: str,
+    source: str,
+    local_date: object,
+    timezone: str,
 ) -> tuple[Observation, ...]:
     rows = (
         await session.scalars(
@@ -362,16 +369,12 @@ async def load_day_observations(
             )
         )
     ).all()
+    zone = ZoneInfo(timezone)
     return tuple(
         row
         for row in rows
-        if row.observed_at.astimezone(__import__("zoneinfo", fromlist=["ZoneInfo"]).ZoneInfo(
-            "UTC"
-        )) is not None
-        and row.observed_at.astimezone(
-            __import__("zoneinfo", fromlist=["ZoneInfo"]).ZoneInfo("UTC")
-        ).date() == local_date
-        and row.air_temperature is not None
+        if row.air_temperature is not None
+        and row.observed_at.astimezone(zone).date() == local_date
     )
 
 
@@ -414,36 +417,6 @@ async def ingest_observations(
         )
         inserted += 1
     return inserted
-```
-
-Note for the implementer: the awkward `load_day_observations` zone handling above is a placeholder-shaped wart; replace it with a clean implementation using `zoneinfo.ZoneInfo` imported at module top and a `timezone: str` parameter:
-
-```python
-from zoneinfo import ZoneInfo
-
-
-async def load_day_observations(
-    session: AsyncSession,
-    *,
-    station_id: str,
-    source: str,
-    local_date: object,
-    timezone: str,
-) -> tuple[Observation, ...]:
-    rows = (
-        await session.scalars(
-            select(Observation).where(
-                Observation.station_id == station_id, Observation.source == source
-            )
-        )
-    ).all()
-    zone = ZoneInfo(timezone)
-    return tuple(
-        row
-        for row in rows
-        if row.air_temperature is not None
-        and row.observed_at.astimezone(zone).date() == local_date
-    )
 ```
 
 - [ ] **Step 4: Run the observation tests and the full gate**
@@ -491,16 +464,7 @@ Expected: FAIL, `AttributeError`.
 
 - [ ] **Step 3: Implement the job in `app/main.py`**
 
-Imports to add:
-
-```python
-from app.services.observations import (
-    AviationWeatherObservations,
-    ingest_observations,
-)
-```
-
-Wait — Task 2 did not define `AviationWeatherObservations` (the HTTP client). Define it in `app/services/observations.py` now (add to the module):
+First, define `AviationWeatherObservations` in `app/services/observations.py` (the module created in Task 2), appending to that file:
 
 ```python
 from app.services.http import ResilientHttpClient
@@ -518,7 +482,11 @@ class AviationWeatherObservations:
             params={
                 "ids": station_id,
                 "format": "json",
-                "date": local_date.strftime("%Y%m%d") if hasattr(local_date, "strftime") else str(local_date),
+                "date": (
+                    local_date.strftime("%Y%m%d")
+                    if hasattr(local_date, "strftime")
+                    else str(local_date)
+                ),
             },
         )
         return parse_aviation_weather_observations(payload, station_id=station_id)
@@ -606,7 +574,17 @@ And expose it on state next to the other jobs:
         app.state.run_observation_ingest = scheduled_observation_ingest
 ```
 
-Add the config setting `aviation_weather_api_url: str = "https://aviationweather.gov/api/data/metar"` to `app/config.py` and the `DomainContract` import (verify it is already imported in `app/main.py`; add if missing).
+Add the config setting to `app/config.py`:
+
+```python
+    aviation_weather_api_url: str = "https://aviationweather.gov/api/data/metar"
+```
+
+Add `DomainContract` to the model import in `app/main.py` (currently `from app.models import OrderBookSnapshot, Outcome, ProviderError`):
+
+```python
+from app.models import DomainContract, OrderBookSnapshot, Outcome, ProviderError
+```
 
 - [ ] **Step 4: Run the wiring test and gate**
 
@@ -1022,28 +1000,69 @@ git commit -m "feat: blend authoritative observations into weather probabilities
 
 - [ ] **Step 1: Write failing test**
 
-Append to `tests/test_end_to_end.py`:
+Append to `tests/test_end_to_end.py` (the harness classes `StaticPolymarket`, `StaticForecast`, `book`, and the imports `Signal`, `ExecutionControlState` are already defined in this file):
 
 ```python
-def test_signal_persists_per_model_probabilities() -> None:
-    from sqlalchemy import select
+@pytest.mark.asyncio
+async def test_signal_persists_per_model_probabilities(tmp_path: Path) -> None:
+    gamma_payload = json.loads((FIXTURES / "london_event.json").read_text(encoding="utf-8"))
+    event = parse_gamma_search(gamma_payload)[0]
+    ensemble_payload = json.loads((FIXTURES / "london_ensemble.json").read_text(encoding="utf-8"))
+    forecast = parse_open_meteo_response(
+        ensemble_payload, model="gfs_seamless", retrieved_at=datetime(2026, 8, 2, 9, tzinfo=UTC)
+    )
+    books = (
+        book("condition-low", "yes-low", "0.80"),
+        book("condition-exact", "yes-exact", "0.10"),
+        book("condition-high", "yes-high", "0.80"),
+    )
+    database_url = f"sqlite+aiosqlite:///{(tmp_path / 'model-probs.db').as_posix()}"
+    settings = Settings(
+        database_url=database_url,
+        min_ensemble_members=2,
+        min_usable_edge=Decimal("0.10"),
+        estimated_fee=Decimal("0.00"),
+        slippage_buffer=Decimal("0.01"),
+        uncertainty_buffer=Decimal("0.04"),
+        rule_risk_buffer=Decimal("0.02"),
+        paper_starting_balance=Decimal("100"),
+    )
+    engine = make_engine(database_url)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = make_session_factory(engine)
+    async with sessions() as session:
+        session.add(
+            ExecutionControlState(
+                id=1,
+                paused=False,
+                revision=0,
+                request_id="weather-test",
+                actor="test",
+                reason="test entries allowed",
+                updated_at=datetime(2026, 8, 2, 9, tzinfo=UTC),
+            )
+        )
+        await session.commit()
 
-    from app.models import Signal
+    await scan_once(
+        settings=settings,
+        sessions=sessions,
+        polymarket=StaticPolymarket(event, books),
+        forecast_providers=(StaticForecast(forecast),),
+        stations=load_station_registry(Path("config/stations.yaml")),
+        overrides={"775541": {"rounding_method": "half_up"}},
+        telegram=None,
+        now=datetime(2026, 8, 2, 9, tzinfo=UTC),
+    )
 
-    # Uses the existing recorded-flow harness in this module (same setup as the
-    # accepted-signal test); after one scan, the stored signal must contain
-    # signal_data["model_probabilities"] keyed by configured model.
-    ...
-```
-
-Implementation note for the engineer: this test reuses the existing end-to-end harness (StaticPolymarket / StaticForecast / RecordingTelegram already defined in `tests/test_end_to_end.py`). Copy the accepted-signal test body, then assert:
-
-```python
-    signal = (await session.scalars(select(Signal))).one()
-    model_probs = signal.signal_data["model_probabilities"]
+    async with sessions() as session:
+        signal = (await session.scalars(select(Signal))).one()
+        model_probs = signal.signal_data["model_probabilities"]
     assert isinstance(model_probs, dict)
     assert set(model_probs) == {"gfs_seamless"}
     assert 0 <= float(model_probs["gfs_seamless"]) <= 1
+    await engine.dispose()
 ```
 
 - [ ] **Step 2: Run to confirm failure**
@@ -1359,7 +1378,7 @@ Add a method after `run_settlement_job`:
             }
 ```
 
-Verify `Decimal` is imported in `app/services/application.py`; add `from decimal import Decimal` if missing.
+`app/services/application.py` does not import `Decimal` today; add `from decimal import Decimal` to its imports.
 
 Hook calibration into the settlement job (append at the end of `run_settlement_job`, before the return):
 
@@ -1400,19 +1419,14 @@ In `_execute`:
             )
 ```
 
-Add `from decimal import Decimal` to `app/cli.py` if missing, and in `tests/test_cli_contract.py` add:
+In `tests/test_cli_contract.py` add:
 
 ```python
 def test_calibrate_command_is_registered() -> None:
     from app.cli import build_parser
 
-    parser = build_parser()
-    assert "calibrate" in {action.dest for action in parser._actions if action.dest} or any(
-        action.dest == "calibrate" for action in parser._actions
-    )
+    assert "calibrate" in build_parser().format_help()
 ```
-
-Implementation note: use the parser's actual subparsers structure — assert `build_parser().parse_args(["calibrate"])` raises no SystemExit for a missing required arg other than expected, or simply assert the command string is in the parser help output: `assert "calibrate" in build_parser().format_help()`.
 
 - [ ] **Step 6: Run the model-weights tests and full gate**
 
@@ -1505,37 +1519,6 @@ def test_parse_github_issue_extracts_document_fields() -> None:
     assert len(document.content_hash) == 64
 
 
-def test_ingest_github_issues_persists_and_deduplicates() -> None:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    import asyncio
-
-    async def run() -> None:
-        async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
-        sessions = make_session_factory(engine)
-        retrieved_at = datetime(2026, 8, 2, 0, 0, tzinfo=UTC)
-        async with sessions() as session:
-            count = await ingest_github_issues(
-                session, _payload(), retrieved_at=retrieved_at
-            )
-            assert count == 2
-            again = await ingest_github_issues(
-                session, _payload(), retrieved_at=retrieved_at
-            )
-            assert again == 0
-            rows = (await session.scalars(select(ResearchDocument))).all()
-            assert len(rows) == 2
-
-    asyncio.run(run())
-    import asyncio as _a  # noqa: F401 (mypy-friendly shutdown)
-
-    _ = _a
-    engine.sync_engine.dispose()
-```
-
-Implementation note: the test above uses `asyncio.run` only because it was written before knowing the project runs pytest with `asyncio_mode = "auto"`. Prefer the async test style used elsewhere:
-
-```python
 async def test_ingest_github_issues_persists_and_deduplicates() -> None:
     engine = make_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
@@ -1715,7 +1698,7 @@ async def research(request: Request) -> list[dict[str, object]]:
     return await research_rows(request)
 ```
 
-Add the `ResearchDocument` import to `app/api.py`. In `app/dashboard.py`, add:
+Add the `ResearchDocument` import to the existing `from app.models import (...)` block in `app/api.py` (verified: it is not currently imported there). In `app/dashboard.py`, add:
 
 ```python
 @router.get("/research")
