@@ -722,11 +722,28 @@ class PaperLifecycle:
                     )
                     if snapshot is None:
                         raise
-            won = (signal.outcome_label or "").upper() == outcome
+            # Weather signals carry the bucketed outcome label (e.g. "24°C or
+            # higher"), never YES/NO, so the derived outcome already encodes
+            # whether the signal's bucket matched the resolved bucket: a weather
+            # position wins iff the derived outcome is YES. Crypto signals are
+            # labeled YES/NO and win when their label matches the outcome.
+            if contract.domain == "weather":
+                won = outcome == "YES"
+            else:
+                won = (signal.outcome_label or "").upper() == outcome
             payout = position.shares if won else Decimal("0")
             realized = payout - position.amount
             observed = Decimal("1") if won else Decimal("0")
             brier = (signal.model_probability - observed) ** 2
+            resolution_data: dict[str, object] = {
+                "source": evidence.source,
+                "contract_id": contract.id,
+                "evidence_fingerprint": evidence_fingerprint,
+            }
+            if contract.domain == "weather":
+                resolution_data["resolved_bucket"] = str(
+                    evidence.normalized_values.get("bucket_label", "")
+                )
             settlement = PaperSettlement(
                 position_id=position.id,
                 evidence_snapshot_id=snapshot.id,
@@ -739,11 +756,7 @@ class PaperLifecycle:
                 payout=payout,
                 realized_pnl=realized,
                 brier_score=float(brier),
-                resolution_data={
-                    "source": evidence.source,
-                    "contract_id": contract.id,
-                    "evidence_fingerprint": evidence_fingerprint,
-                },
+                resolution_data=resolution_data,
             )
             try:
                 async with session.begin_nested():

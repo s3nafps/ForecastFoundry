@@ -2,9 +2,10 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import cast
+from zoneinfo import ZoneInfo
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
@@ -170,8 +171,6 @@ def create_app(
                 now = datetime.now(UTC)
                 if contract.expiry - now > timedelta(hours=resolved.observation_blend_hours):
                     continue
-                if contract.expiry < now - timedelta(hours=1):
-                    continue
                 source = str(contract.resolution_source)
                 try:
                     data = contract.contract_data
@@ -179,6 +178,15 @@ def create_app(
                     if station_id not in stations_by_id:
                         continue
                     local_date = datetime.fromisoformat(str(data.get("local_date"))).date()
+                    timezone = str(data.get("timezone"))
+                    window_end = datetime.combine(
+                        local_date + timedelta(days=1), time.min, ZoneInfo(timezone)
+                    ).astimezone(UTC)
+                    # Keep ingesting until the local reporting window is complete
+                    # (next local midnight); settlement coverage requires the final
+                    # hours of the local day, which can fall after contract expiry.
+                    if now > window_end + timedelta(hours=1):
+                        continue
                     rows = await aviation_weather.fetch(station_id, local_date)
                 except Exception as exc:
                     errors += 1

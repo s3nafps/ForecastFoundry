@@ -122,20 +122,22 @@ class ProductionSettlementFetcher:
                     )
                 )
             ).all()
-        rows = [
-            row
-            for row in candidates
-            if row.observed_at.astimezone(zone).date() == market_date
-            and row.air_temperature is not None
-        ]
+        rows: list[tuple[Observation, float]] = []
+        for row in candidates:
+            if row.observed_at.astimezone(zone).date() != market_date:
+                continue
+            temperature = row.air_temperature
+            if temperature is None:
+                continue
+            rows.append((row, temperature))
         if not rows:
             raise SettlementFetchError("weather_observations_missing")
-        temperatures = [row.air_temperature for row in rows if row.air_temperature is not None]
-        rounded = round_temperature(max(temperatures), rounding)
+        rounded = round_temperature(max(temperature for _, temperature in rows), rounding)
         bucket = next((item for item in buckets if item.contains(rounded)), None)
         if bucket is None or not signal.outcome_label:
             raise SettlementFetchError("weather_observation_outcome_unmapped")
         payload = {
+            "provider": "aviation_weather",
             "query": {
                 "station_id": station,
                 "source": source,
@@ -144,16 +146,14 @@ class ProductionSettlementFetcher:
             },
             "observations": [
                 {
-                    "id": row.id,
-                    "station_id": row.station_id,
-                    "source": row.source,
-                    "observed_at": row.observed_at.isoformat(),
-                    "retrieved_at": row.retrieved_at.isoformat(),
-                    "air_temperature": str(row.air_temperature),
+                    "icaoId": row.station_id,
+                    "obsTime": int(row.observed_at.timestamp()),
+                    "temp": temperature,
+                    "rawOb": str(row.raw_data.get("rawOb") or "") if row.raw_data else "",
+                    "receiptTime": int(row.retrieved_at.timestamp()),
                     "quality_flags": row.quality_flags,
-                    "raw_data": row.raw_data,
                 }
-                for row in rows
+                for row, temperature in rows
             ],
         }
         assert contract.expiry is not None
@@ -161,7 +161,7 @@ class ProductionSettlementFetcher:
             contract_id=contract.id,
             source=source,
             observed_at=contract.expiry,
-            retrieved_at=max(row.retrieved_at for row in rows),
+            retrieved_at=datetime.now(UTC),
             outcome_label=None,
             raw_response_hash=canonical_payload_hash(payload),
             raw_payload=payload,
@@ -173,6 +173,13 @@ class ProductionSettlementFetcher:
                 "bucket_label": bucket.label,
             },
             provider_version="persisted-observations-v1",
-            quality_flags=tuple(dict.fromkeys(flag for row in rows for flag in row.quality_flags)),
+            quality_flags=tuple(
+                dict.fromkeys(
+                    flag
+                    for row, _ in rows
+                    for flag in row.quality_flags
+                    if str(flag).lower() not in {"fatal", "invalid", "missing_temperature"}
+                )
+            ),
             license_metadata={"evidence_role": "settlement", "source": source},
         )

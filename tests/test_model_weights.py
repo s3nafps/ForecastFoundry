@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from app.database import make_engine, make_session_factory
 from app.models import ApplicationSetting, Base
 from app.services.model_weights import (
@@ -101,6 +103,22 @@ async def test_load_weights_falls_back_on_corrupt_stored_value() -> None:
     sessions = make_session_factory(engine)
     async with sessions() as session:
         session.add(ApplicationSetting(key=WEIGHTS_KEY, value={"gfs_seamless": "not-a-number"}))
+        await session.commit()
+
+    async with sessions() as session:
+        weights = await load_model_weights(session)
+
+    assert weights == {}
+
+
+@pytest.mark.parametrize("stored", ["nan", "inf", "1.5"])
+async def test_load_weights_rejects_non_finite_and_out_of_range_values(stored: str) -> None:
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = make_session_factory(engine)
+    async with sessions() as session:
+        session.add(ApplicationSetting(key=WEIGHTS_KEY, value={"gfs_seamless": stored}))
         await session.commit()
 
     async with sessions() as session:

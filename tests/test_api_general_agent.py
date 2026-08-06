@@ -54,7 +54,7 @@ def _weather_contract(
         accepted=True,
         resolution_source=resolution_source,
         expiry=expiry,
-        contract_data={"station_id": "EGLC", "local_date": local_date},
+        contract_data={"station_id": "EGLC", "local_date": local_date, "timezone": "UTC"},
         rejection_reasons=[],
         provenance={},
         fingerprint=fingerprint,
@@ -193,11 +193,12 @@ async def test_observation_ingest_skips_contracts_past_expiry_grace(
     monkeypatch.setattr("app.main.AviationWeatherObservations", _FakeAviationWeather)
     application = create_app(Settings(app_env="test", database_url=database_url))
 
+    now = datetime.now(UTC)
     expired = _weather_contract(
         market_external_id="weather-eglc-expired",
         fingerprint="weather-eglc-expired",
-        expiry=datetime.now(UTC) - timedelta(hours=2),
-        local_date=datetime.now(UTC).date().isoformat(),
+        expiry=now - timedelta(hours=2),
+        local_date=(now - timedelta(days=1)).date().isoformat(),
     )
 
     async with application.router.lifespan_context(application):

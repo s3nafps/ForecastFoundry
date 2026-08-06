@@ -1,3 +1,4 @@
+import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -76,9 +77,15 @@ async def load_model_weights(session: AsyncSession) -> dict[str, float]:
     weights: dict[str, float] = {}
     for model, weight in setting.value.items():
         try:
-            weights[str(model)] = float(weight)
+            value = float(weight)
         except (TypeError, ValueError):
             continue
+        # A corrupted stored weight must never leak NaN/Inf or an out-of-range
+        # probability into the blend: probabilities.py would otherwise emit NaN
+        # and trip the CheckConstraint on the probabilities table.
+        if not math.isfinite(value) or not 0 <= value <= 1:
+            continue
+        weights[str(model)] = value
     return weights
 
 
