@@ -1,7 +1,9 @@
 # ForecastFoundry hardening audit
 
-Date: 2026-08-03  
-Scope: production-hardening milestone after the general-agent prototype.
+Date: 2026-08-06
+Scope: completion of the general-agent milestone with observation-informed
+probabilities, calibration-based model weighting, research evidence, and the
+final gate.
 
 ## Delivered
 
@@ -32,20 +34,41 @@ Scope: production-hardening milestone after the general-agent prototype.
 
 ## Verification
 
-The final gate completed on 2026-08-03:
+The final completion gate ran on 2026-08-06:
 
 ```text
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m ruff format --check .
 .\.venv\Scripts\python.exe -m mypy app
-DATABASE_URL=sqlite+aiosqlite:///./data/ci.db alembic upgrade head
+DATABASE_URL=sqlite+aiosqlite:///./acceptance.db alembic upgrade head
+DATABASE_URL=sqlite+aiosqlite:///./acceptance.db alembic downgrade base
 git diff --check
 ```
 
-Results: 102 tests passed, Ruff clean, mypy clean, SQLite migrations upgraded
-and downgraded successfully, and `git diff --check` clean. Docker smoke tests
-were not run because Docker is not installed in the build environment. The CI
-workflow runs the same checks and a repository secret scan.
+Results: 244 tests passed, 1 skipped (PostgreSQL integration skipped locally),
+Ruff check and format clean, mypy clean, Alembic upgrade to revision `0009` and
+downgrade to base verified against SQLite, and `git diff --check` clean.
+Migrations span revisions `0001` through `0009`.
+
+Completed features in this gate:
+
+- Observation-informed probabilities: AviationWeather METAR ingestion with the
+  `observation_blend_hours`/`observation_min_count` gate, observation-guided
+  member reconciliation, and `observations_used`/`blend_applied` on estimates.
+- Calibration-based model weighting: `forecastfoundry calibrate` with the
+  30-sample / 5% improvement promotion gate and equal-weight default, persisted
+  under `model_weights:weather`.
+- Research evidence: GitHub issue ingestion into `research_documents` with
+  feature-only provenance, `GET /api/v1/research`, and the `/research`
+  dashboard page.
+- CI: three jobs — `quality` (pytest, Ruff, mypy, SQLite migrations including
+  downgrade), `postgres` (postgres:16 service, Alembic up/down/up and
+  `tests/test_postgres_integration.py` via `FORECASTFOUNDRY_TEST_POSTGRES=1`,
+  with the `asyncpg` dev extra), and `docker` (build, compose up, `/health` and
+  `/ready` polls, compose down).
+
+CI run URLs: <added after branch push>
 
 ## Explicitly disabled / not claimed
 
@@ -78,8 +101,11 @@ workflow runs the same checks and a repository secret scan.
 ## Migration / rollback notes
 
 Revisions `0003` and `0004` add durable control, credential, and health tables;
-they do not rename or delete existing weather tables. Back up the runtime
-database, run `alembic upgrade head`, verify the control row, and only then
-start scheduler/MCP/executor services. Rollback is supported through Alembic
-but should be performed during a maintenance window because it removes audit
-history tables introduced by these revisions.
+they do not rename or delete existing weather tables. Revisions `0005`-`0009`
+add execution-control idempotency, crypto evidence signals, domain contract
+identity, paper lifecycle state, and observation-blend columns
+(`observations_used`, `blend_applied`) on probability estimates. Back up the
+runtime database, run `alembic upgrade head`, verify the control row, and only
+then start scheduler/MCP/executor services. Rollback is supported through
+Alembic but should be performed during a maintenance window because it removes
+audit history tables introduced by these revisions.
