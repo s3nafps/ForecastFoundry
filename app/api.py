@@ -22,6 +22,7 @@ from app.models import (
     ProviderError,
     ReconciliationEvent,
     RejectedSignal,
+    ResearchDocument,
     Signal,
 )
 from app.services.application import ApplicationServices
@@ -291,6 +292,34 @@ async def performance(request: Request) -> dict[str, object]:
 @router.get("/errors")
 async def errors(request: Request) -> list[dict[str, object]]:
     return await error_rows(request)
+
+
+async def research_rows(request: Request) -> list[dict[str, object]]:
+    async with request.app.state.sessions() as session:
+        rows = (
+            await session.scalars(
+                select(ResearchDocument).order_by(ResearchDocument.published_at.desc()).limit(100)
+            )
+        ).all()
+    return [
+        {
+            "id": row.id,
+            "provider": row.provider,
+            "external_id": row.external_id,
+            "url": row.url,
+            "published_at": row.published_at,
+            "retrieved_at": row.retrieved_at,
+            "content_hash": row.content_hash,
+            "feature_only": row.feature_only,
+            "redacted_text": row.redacted_text[:200],
+        }
+        for row in rows
+    ]
+
+
+@router.get("/research")
+async def research(request: Request) -> list[dict[str, object]]:
+    return await research_rows(request)
 
 
 @router.get("/config")
