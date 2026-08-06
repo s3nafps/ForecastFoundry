@@ -30,6 +30,7 @@ dev = [
   "pytest-asyncio>=0.24",
   "ruff>=0.8",
   "types-PyYAML>=6.0",
+  "asyncpg>=0.29",
 ]
 live = [
   "py-clob-client-v2>=0.1",

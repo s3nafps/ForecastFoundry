@@ -26,3 +26,11 @@ def test_docker_defaults_to_paper_and_loopback_http() -> None:
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     assert "EXECUTION_ENABLED=false" in env_example
     assert "REAL_TRADING_ENABLED=false" in env_example
+
+
+def test_postgres_extra_declares_asyncpg() -> None:
+    import tomllib
+
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    extras = config["project"]["optional-dependencies"]
+    assert any("asyncpg" in extra for extra in extras["dev"])
