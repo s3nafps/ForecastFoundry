@@ -165,17 +165,22 @@ def create_app(
             ingested_total = 0
             errors = 0
             for contract in contracts:
-                if contract.expiry is None or contract.expiry - datetime.now(UTC) > timedelta(
+                if contract.expiry is None:
+                    continue
+                now = datetime.now(UTC)
+                if contract.expiry - now > timedelta(
                     hours=resolved.observation_blend_hours
                 ):
                     continue
-                data = contract.contract_data
-                station_id = str(data.get("station_id", ""))
-                if station_id not in stations_by_id:
+                if contract.expiry < now - timedelta(hours=1):
                     continue
                 source = str(contract.resolution_source)
-                local_date = datetime.fromisoformat(str(data.get("local_date"))).date()
                 try:
+                    data = contract.contract_data
+                    station_id = str(data.get("station_id", ""))
+                    if station_id not in stations_by_id:
+                        continue
+                    local_date = datetime.fromisoformat(str(data.get("local_date"))).date()
                     rows = await aviation_weather.fetch(station_id, local_date)
                 except Exception as exc:
                     errors += 1
