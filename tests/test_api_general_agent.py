@@ -65,3 +65,19 @@ async def test_general_agent_api_is_redacted_and_operator_controls_are_authorize
             )
             assert conflict.status_code == 409
             assert conflict.json()["detail"]["type"] == "idempotency_conflict"
+
+
+async def test_observation_ingest_job_is_registered_on_app_state(
+    tmp_path: Path,
+) -> None:
+    from app.main import create_app
+
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'observation-ingest.db'}"
+    engine = make_engine(database_url)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    await engine.dispose()
+    application = create_app(Settings(app_env="test", database_url=database_url))
+
+    async with application.router.lifespan_context(application):
+        assert hasattr(application.state, "run_observation_ingest")

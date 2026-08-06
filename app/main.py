@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -19,7 +19,7 @@ from app.dashboard import router as dashboard_router
 from app.database import make_engine, make_session_factory
 from app.domains.base import MarketInput
 from app.logging import configure_logging
-from app.models import OrderBookSnapshot, Outcome, ProviderError
+from app.models import DomainContract, OrderBookSnapshot, Outcome, ProviderError
 from app.observability import Metrics
 from app.providers.registry import ProviderRegistry
 from app.schemas import OrderBook
@@ -29,6 +29,7 @@ from app.services.crypto_pipeline import CryptoPaperPipeline
 from app.services.execution_control import ExecutionControl
 from app.services.forecast import OpenMeteoProvider
 from app.services.http import CircuitBreaker, ResilientHttpClient
+from app.services.observations import AviationWeatherObservations, ingest_observations
 from app.services.paper import SettlementFetcher
 from app.services.polymarket import PolymarketClient
 from app.services.provider_health import ProviderHealthMonitor
@@ -76,6 +77,9 @@ def create_app(
         )
         stations = load_station_registry(Path(resolved.station_config_path))
         overrides = load_market_overrides(Path(resolved.market_overrides_path))
+        aviation_weather = AviationWeatherObservations(
+            provider_http, resolved.aviation_weather_api_url
+        )
         telegram = None
         if resolved.telegram_bot_token and resolved.telegram_admin_user_id:
             telegram = TelegramClient(
@@ -150,6 +154,58 @@ def create_app(
                 active_settlement_fetcher, now=datetime.now(UTC)
             )
 
+        async def scheduled_observation_ingest() -> dict[str, object]:
+            stations_by_id = {station.station_id: station for station in stations.values()}
+            async with sessions() as session:
+                contracts = (
+                    await session.scalars(
+                        select(DomainContract).where(DomainContract.domain == "weather")
+                    )
+                ).all()
+            ingested_total = 0
+            errors = 0
+            for contract in contracts:
+                if contract.expiry is None or contract.expiry - datetime.now(UTC) > timedelta(
+                    hours=resolved.observation_blend_hours
+                ):
+                    continue
+                data = contract.contract_data
+                station_id = str(data.get("station_id", ""))
+                if station_id not in stations_by_id:
+                    continue
+                source = str(contract.resolution_source)
+                local_date = datetime.fromisoformat(str(data.get("local_date"))).date()
+                try:
+                    rows = await aviation_weather.fetch(station_id, local_date)
+                except Exception as exc:
+                    errors += 1
+                    async with sessions() as session:
+                        session.add(
+                            ProviderError(
+                                provider="aviation_weather",
+                                operation="observe",
+                                error_type=type(exc).__name__,
+                                message=str(exc),
+                                details={},
+                                retryable=True,
+                                occurred_at=datetime.now(UTC),
+                            )
+                        )
+                        await session.commit()
+                    continue
+                if not rows:
+                    continue
+                async with sessions() as session:
+                    ingested_total += await ingest_observations(
+                        session,
+                        station_id=station_id,
+                        source=source,
+                        rows=rows,
+                        retrieved_at=datetime.now(UTC),
+                    )
+                    await session.commit()
+            return {"status": "completed", "ingested": ingested_total, "errors": errors}
+
         async def store_websocket_book(book: OrderBook) -> None:
             async with sessions() as session:
                 outcome = await session.scalar(
@@ -212,6 +268,7 @@ def create_app(
         app.state.run_scan = scheduled_scan
         app.state.run_crypto_scan = scheduled_crypto_scan
         app.state.run_settlement = scheduled_settlement
+        app.state.run_observation_ingest = scheduled_observation_ingest
 
         scheduler: AsyncIOScheduler | None = None
         websocket_task: asyncio.Task[None] | None = None
@@ -233,6 +290,13 @@ def create_app(
             )
             scheduler.add_job(
                 scheduled_settlement,
+                "interval",
+                seconds=resolved.observation_poll_seconds,
+                max_instances=1,
+                coalesce=True,
+            )
+            scheduler.add_job(
+                scheduled_observation_ingest,
                 "interval",
                 seconds=resolved.observation_poll_seconds,
                 max_instances=1,

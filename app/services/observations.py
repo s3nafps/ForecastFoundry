@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Observation
 from app.schemas import ForecastPoint
+from app.services.http import ResilientHttpClient
 
 
 class ObservationParseError(ValueError):
@@ -77,7 +78,11 @@ def apply_observations_to_points(
 
     def latest_observed(timestamp: datetime) -> float | None:
         candidates = [obs for obs in past if obs.observed_at <= timestamp + timedelta(hours=1)]
-        return candidates[-1].temperature_celsius if candidates else None
+        return (
+            max(candidates, key=lambda obs: obs.observed_at).temperature_celsius
+            if candidates
+            else None
+        )
 
     return tuple(
         ForecastPoint(
@@ -102,9 +107,9 @@ async def load_day_observations(
 ) -> tuple[Observation, ...]:
     rows = (
         await session.scalars(
-            select(Observation).where(
-                Observation.station_id == station_id, Observation.source == source
-            )
+            select(Observation)
+            .where(Observation.station_id == station_id, Observation.source == source)
+            .order_by(Observation.observed_at)
         )
     ).all()
     zone = ZoneInfo(timezone)
@@ -155,3 +160,25 @@ async def ingest_observations(
         )
         inserted += 1
     return inserted
+
+
+class AviationWeatherObservations:
+    def __init__(self, http: ResilientHttpClient, endpoint: str) -> None:
+        self._http = http
+        self._endpoint = endpoint
+
+    async def fetch(self, station_id: str, local_date: object) -> tuple[ObservedHour, ...]:
+        payload = await self._http.request_json(
+            "GET",
+            self._endpoint,
+            params={
+                "ids": station_id,
+                "format": "json",
+                "date": (
+                    local_date.strftime("%Y%m%d")
+                    if hasattr(local_date, "strftime")
+                    else str(local_date)
+                ),
+            },
+        )
+        return parse_aviation_weather_observations(payload, station_id=station_id)
