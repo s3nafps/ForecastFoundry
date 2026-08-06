@@ -1,5 +1,7 @@
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
@@ -10,8 +12,15 @@ from app.database import make_engine
 from app.main import create_app
 from app.models import Base, DomainContract, Observation, ProviderError
 from app.services.observations import ObservedHour
+from app.services.research import ingest_github_issues
 
 _FAKE_FETCH_CALLS: list[tuple[str, object]] = []
+
+
+def _github_payload() -> dict[str, object]:
+    fixtures = Path(__file__).parent / "fixtures"
+    raw = json.loads((fixtures / "github_issues.json").read_text(encoding="utf-8"))
+    return cast(dict[str, object], raw)
 
 
 class _FakeAviationWeather:
@@ -201,3 +210,50 @@ async def test_observation_ingest_skips_contracts_past_expiry_grace(
         async with application.state.sessions() as session:
             observations = (await session.scalars(select(Observation))).all()
     assert observations == []
+
+
+async def test_research_api_lists_documents_ordered_and_dashboard_renders(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'research-api.db'}"
+    engine = make_engine(database_url)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    await engine.dispose()
+    app = create_app(Settings(app_env="test", database_url=database_url))
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            empty = await client.get("/api/v1/research")
+            assert empty.status_code == 200
+            assert empty.json() == []
+
+            async with app.state.sessions() as session:
+                await ingest_github_issues(
+                    session, _github_payload(), retrieved_at=datetime(2026, 8, 2, 9, tzinfo=UTC)
+                )
+
+            rows = (await client.get("/api/v1/research")).json()
+            assert len(rows) == 2
+            expected_keys = {
+                "provider",
+                "external_id",
+                "url",
+                "published_at",
+                "retrieved_at",
+                "content_hash",
+                "feature_only",
+                "redacted_text",
+            }
+            for row in rows:
+                assert expected_keys.issubset(row)
+                assert row["provider"] == "github"
+                assert row["feature_only"] is True
+                assert len(row["redacted_text"]) <= 200
+            assert rows[0]["external_id"] == "1235"
+            assert rows[1]["external_id"] == "1234"
+            assert rows[0]["published_at"] > rows[1]["published_at"]
+
+            dashboard = await client.get("/research")
+            assert dashboard.status_code == 200
