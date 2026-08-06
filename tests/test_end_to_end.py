@@ -114,6 +114,7 @@ async def test_recorded_london_market_runs_end_to_end_without_duplicate_alerts(
         uncertainty_buffer=Decimal("0.04"),
         rule_risk_buffer=Decimal("0.02"),
         paper_starting_balance=Decimal("100"),
+        observation_blend_hours=2,
     )
     engine = make_engine(database_url)
     async with engine.begin() as connection:

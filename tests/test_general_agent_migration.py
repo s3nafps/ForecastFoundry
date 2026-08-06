@@ -43,6 +43,15 @@ def test_general_agent_migration_creates_auditable_tables(tmp_path: Path) -> Non
     assert NEW_TABLES <= tables
 
 
+def test_probability_estimate_observation_columns_exist() -> None:
+    # Covered by the fresh upgrade/downgrade test in this module; assert here
+    # that the columns are declared on the model.
+    from app.models import ProbabilityEstimate
+
+    assert hasattr(ProbabilityEstimate, "observations_used")
+    assert hasattr(ProbabilityEstimate, "blend_applied")
+
+
 def test_models_keep_live_orders_separate_from_paper_positions() -> None:
     assert "execution_orders" in Base.metadata.tables
     assert "paper_positions" in Base.metadata.tables

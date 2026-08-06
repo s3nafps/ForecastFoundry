@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     weather_poll_seconds: int = Field(default=900, gt=0)
     observation_poll_seconds: int = Field(default=300, gt=0)
     observation_blend_hours: int = Field(default=36, gt=0)
+    observation_min_count: int = Field(default=6, gt=0)
     min_rule_confidence: int = Field(default=90, ge=0, le=100)
     min_ensemble_members: int = Field(default=25, gt=0)
     min_usable_edge: Decimal = Field(default=Decimal("0.10"), ge=0, le=1)

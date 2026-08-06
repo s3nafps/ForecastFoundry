@@ -202,6 +202,8 @@ class ProbabilityEstimate(Base):
     ensemble_spread: Mapped[float] = mapped_column(Float)
     uncertainty_score: Mapped[float] = mapped_column(Float)
     model_weights: Mapped[dict[str, float]] = mapped_column(JSON)
+    observations_used: Mapped[int] = mapped_column(Integer, default=0)
+    blend_applied: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Signal(Base):

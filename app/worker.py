@@ -1,6 +1,6 @@
 import hashlib
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -40,6 +40,11 @@ from app.schemas import (
 )
 from app.services.contracts import persist_domain_contract
 from app.services.forecast import ForecastProvider
+from app.services.observations import (
+    ObservedHour,
+    apply_observations_to_points,
+    load_day_observations,
+)
 from app.services.paper import PaperLifecycle, get_paper_balance
 from app.services.probability import calculate_probabilities, daily_maximum
 from app.services.rules import RuleNormalizationError, normalize_temperature_event
@@ -286,6 +291,43 @@ async def scan_once(
                 except Exception as exc:
                     await _provider_error(session, "weather", "forecast", exc, now)
 
+            blend_applied = False
+            observations_used = 0
+            observations: tuple[ObservedHour, ...] = ()
+            assert normalized.measurement == "daily_max_temperature"
+            within_blend = (
+                source_event.end_date is not None
+                and source_event.end_date - now <= timedelta(hours=settings.observation_blend_hours)
+            )
+            if within_blend:
+                observations = await load_day_observations(
+                    session,
+                    station_id=normalized.station_id,
+                    source=normalized.resolution_source,
+                    local_date=normalized.local_date,
+                    timezone=normalized.timezone,
+                )
+            if within_blend and len(observations) >= settings.observation_min_count:
+                observations_used = len(observations)
+                blend_applied = True
+                forecasts = [
+                    forecast.model_copy(
+                        update={
+                            "members": tuple(
+                                member.model_copy(
+                                    update={
+                                        "points": apply_observations_to_points(
+                                            member.points, observations, now=now
+                                        )
+                                    }
+                                )
+                                for member in forecast.members
+                            )
+                        }
+                    )
+                    for forecast in forecasts
+                ]
+
             daily_members: list[MemberDailyValue] = []
             for forecast in forecasts:
                 for member in forecast.members:
@@ -374,6 +416,8 @@ async def scan_once(
                         ensemble_spread=probabilities.ensemble_spread,
                         uncertainty_score=probabilities.uncertainty_score,
                         model_weights=probabilities.model_weights,
+                        observations_used=observations_used,
+                        blend_applied=blend_applied,
                     )
                 )
 
@@ -396,8 +440,8 @@ async def scan_once(
                     minimum_order_size=(book.minimum_order_size if book else None),
                     paper_balance=balance,
                     valid_members=probabilities.valid_members,
-                    observations_required=False,
-                    observations_stale=False,
+                    observations_required=within_blend,
+                    observations_stale=within_blend and not blend_applied,
                     critical_quality_flags=(),
                 )
                 buffers = EdgeBuffers(
@@ -498,7 +542,11 @@ async def scan_once(
                     usable_edge=decision.usable_edge,
                     model_member_counts=model_counts,
                     station_id=normalized.station_id,
-                    observation_summary="not collected in temperature milestone",
+                    observation_summary=(
+                        f"{observations_used} hourly observations blended"
+                        if blend_applied
+                        else "no observations blended"
+                    ),
                     forecast_horizon_hours=_forecast_horizon(
                         now, normalized.local_date, normalized.timezone
                     ),

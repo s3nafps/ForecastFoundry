@@ -104,7 +104,7 @@ async def load_day_observations(
     source: str,
     local_date: object,
     timezone: str,
-) -> tuple[Observation, ...]:
+) -> tuple[ObservedHour, ...]:
     rows = (
         await session.scalars(
             select(Observation)
@@ -114,7 +114,13 @@ async def load_day_observations(
     ).all()
     zone = ZoneInfo(timezone)
     return tuple(
-        row
+        ObservedHour(
+            station_id=row.station_id,
+            observed_at=row.observed_at,
+            temperature_celsius=row.air_temperature,
+            raw_ob=str(row.raw_data.get("rawOb") or "") if row.raw_data else "",
+            quality_flags=tuple(row.quality_flags),
+        )
         for row in rows
         if row.air_temperature is not None
         and row.observed_at.astimezone(zone).date() == local_date
