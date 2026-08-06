@@ -492,6 +492,30 @@ async def scan_once(
                     )
                     continue
 
+                model_probabilities: dict[str, float] = {}
+                for forecast in forecasts:
+                    model_members = tuple(
+                        MemberDailyValue(
+                            model=forecast.model,
+                            member_id=member.member_id,
+                            value=daily_maximum(
+                                member.points, normalized.local_date, normalized.timezone
+                            ),
+                            exclusion_reason=None,
+                        )
+                        for member in forecast.members
+                    )
+                    per_model = calculate_probabilities(
+                        model_members,
+                        normalized.buckets,
+                        rounding_method=normalized.rounding_method,
+                        unit=normalized.unit,
+                        model_weights={},
+                    )
+                    model_probabilities[forecast.model] = float(
+                        per_model.outcome_probabilities.get(source_market.group_item_title, 0.0)
+                    )
+
                 signal = Signal(
                     market_id=market.id,
                     outcome_id=yes.id,
@@ -517,6 +541,7 @@ async def scan_once(
                             "active": source_market.active,
                             "closed": source_market.closed,
                         },
+                        "model_probabilities": model_probabilities,
                     },
                 )
                 session.add(signal)
