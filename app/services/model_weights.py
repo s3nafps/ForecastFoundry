@@ -39,9 +39,8 @@ def extract_samples(
 
 def model_brier(samples: Mapping[str, list[ModelSample]]) -> dict[str, Decimal]:
     return {
-        model: sum(
-            (sample.probability - Decimal(int(sample.won))) ** 2 for sample in entries
-        ) / Decimal(len(entries))
+        model: sum((sample.probability - Decimal(int(sample.won))) ** 2 for sample in entries)
+        / Decimal(len(entries))
         for model, entries in samples.items()
     }
 
@@ -64,9 +63,7 @@ def compute_weights(
     inverse = {model: Decimal("1") / score for model, score in brier.items()}
     total = sum(inverse.values())
     weights = {model: float(weight / total) for model, weight in inverse.items()}
-    blend_brier = sum(
-        brier[model] * Decimal(str(weights[model])) for model in brier
-    )
+    blend_brier = sum(brier[model] * Decimal(str(weights[model])) for model in brier)
     if baseline - blend_brier < min_improvement * baseline:
         return None
     return weights
@@ -85,9 +82,7 @@ async def load_model_weights(session: AsyncSession) -> dict[str, float]:
     return weights
 
 
-async def store_model_weights(
-    session: AsyncSession, weights: Mapping[str, float]
-) -> None:
+async def store_model_weights(session: AsyncSession, weights: Mapping[str, float]) -> None:
     setting = await session.get(ApplicationSetting, WEIGHTS_KEY)
     if setting is None:
         setting = ApplicationSetting(key=WEIGHTS_KEY, value={})

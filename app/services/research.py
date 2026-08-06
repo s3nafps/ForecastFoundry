@@ -14,9 +14,7 @@ class ResearchIngestError(ValueError):
     pass
 
 
-def parse_github_issue(
-    raw: Mapping[str, object], *, retrieved_at: datetime
-) -> ResearchDocument:
+def parse_github_issue(raw: Mapping[str, object], *, retrieved_at: datetime) -> ResearchDocument:
     number = raw.get("number")
     title = raw.get("title")
     if number is None or title is None:

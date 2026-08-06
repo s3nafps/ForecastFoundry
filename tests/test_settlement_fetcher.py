@@ -152,7 +152,8 @@ async def test_weather_fetcher_uses_exact_persisted_station_source_and_local_day
     )
     signal = Signal(outcome_label="25 or above")
     fetcher = ProductionSettlementFetcher(
-        sessions, _CryptoFixture("coinbase", [])  # type: ignore[arg-type]
+        sessions,
+        _CryptoFixture("coinbase", []),  # type: ignore[arg-type]
     )
 
     evidence = await fetcher._weather(contract, signal)

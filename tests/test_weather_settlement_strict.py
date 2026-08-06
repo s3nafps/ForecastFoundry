@@ -56,9 +56,7 @@ def test_strict_weather_contract_dispatches_bucket_label_before_binary_validatio
             "obsTime": int((local_start + timedelta(hours=3 * index)).timestamp()),
             "temp": 24.6 if index == 4 else 20 + index / 10,
             "rawOb": f"EGLC fixture {index}",
-            "receiptTime": int(
-                (local_start + timedelta(hours=3 * index, minutes=5)).timestamp()
-            ),
+            "receiptTime": int((local_start + timedelta(hours=3 * index, minutes=5)).timestamp()),
         }
         for index in range(8)
     ]

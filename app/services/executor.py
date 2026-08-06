@@ -54,9 +54,7 @@ class Executor:
 
     async def submit(self, intent: OrderIntent, risk: RiskDecision) -> ExecutionOrder:
         existing = await self.session.scalar(
-            select(ExecutionOrder).where(
-                ExecutionOrder.client_order_id == intent.client_order_id
-            )
+            select(ExecutionOrder).where(ExecutionOrder.client_order_id == intent.client_order_id)
         )
         if existing is not None:
             return existing

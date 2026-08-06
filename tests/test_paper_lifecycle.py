@@ -602,9 +602,7 @@ def test_paper_lifecycle_migration_round_trip_preserves_existing_data(tmp_path: 
     with pytest.raises(RuntimeError, match="0008 downgrade refused before schema changes"):
         command.downgrade(config, "0007")
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0008",
-        )
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0008",)
         assert (
             connection.execute(
                 "SELECT value FROM application_settings WHERE key = 'paper_balance'"
@@ -633,9 +631,7 @@ def test_paper_lifecycle_migration_empty_downgrade_round_trip(tmp_path: Path) ->
     command.upgrade(config, "head")
     command.downgrade(config, "0007")
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0007",
-        )
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0007",)
         columns = {row[1] for row in connection.execute("PRAGMA table_info(paper_positions)")}
         assert "execution_order_id" not in columns
     command.upgrade(config, "head")

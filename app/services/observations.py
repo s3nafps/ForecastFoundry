@@ -122,8 +122,7 @@ async def load_day_observations(
             quality_flags=tuple(row.quality_flags),
         )
         for row in rows
-        if row.air_temperature is not None
-        and row.observed_at.astimezone(zone).date() == local_date
+        if row.air_temperature is not None and row.observed_at.astimezone(zone).date() == local_date
     )
 
 

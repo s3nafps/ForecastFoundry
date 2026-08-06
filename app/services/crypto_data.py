@@ -328,9 +328,10 @@ def normalize_crypto_settlement_payload(
     matches: list[dict[str, object]] = []
     for row in rows:
         timestamp = row.get("timestamp")
-        if isinstance(timestamp, datetime) and timestamp.astimezone(UTC) + timedelta(
-            seconds=interval_seconds
-        ) == boundary:
+        if (
+            isinstance(timestamp, datetime)
+            and timestamp.astimezone(UTC) + timedelta(seconds=interval_seconds) == boundary
+        ):
             matches.append(row)
     if len(matches) != 1:
         raise CryptoDataQualityError("settlement_candle_boundary_missing")

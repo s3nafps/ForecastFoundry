@@ -934,9 +934,7 @@ def _derive_settlement_outcome(
         raise PaperTradingError("settlement normalized price contradicts raw payload") from exc
     if normalized_price != Decimal(derived["price"]):
         raise PaperTradingError("settlement normalized price contradicts raw payload")
-    if str(values.get("price_definition", "")).strip().lower() != derived[
-        "price_definition"
-    ]:
+    if str(values.get("price_definition", "")).strip().lower() != derived["price_definition"]:
         raise PaperTradingError("settlement normalized price_definition contradicts raw payload")
     try:
         normalized_timestamp = datetime.fromisoformat(
@@ -946,9 +944,10 @@ def _derive_settlement_outcome(
         raise PaperTradingError(
             "settlement normalized source_timestamp contradicts raw payload"
         ) from exc
-    if normalized_timestamp.tzinfo is None or _utc_key(normalized_timestamp) != derived[
-        "source_timestamp"
-    ]:
+    if (
+        normalized_timestamp.tzinfo is None
+        or _utc_key(normalized_timestamp) != derived["source_timestamp"]
+    ):
         raise PaperTradingError("settlement normalized source_timestamp contradicts raw payload")
     try:
         price = Decimal(derived["price"])
@@ -1117,7 +1116,7 @@ async def _existing_execution_decision(
                 (PaperExecutionDecision.signal_id == signal_id)
                 | (PaperExecutionDecision.request_id == request_id)
             )
-        )
+        ),
     )
 
 

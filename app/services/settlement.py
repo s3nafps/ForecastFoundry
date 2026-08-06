@@ -93,9 +93,7 @@ class ProductionSettlementFetcher:
             license_metadata={"classification": "public", "evidence_role": "settlement"},
         )
 
-    async def _weather(
-        self, contract: DomainContract, signal: Signal
-    ) -> SettlementEvidence:
+    async def _weather(self, contract: DomainContract, signal: Signal) -> SettlementEvidence:
         data = contract.contract_data
         try:
             station = str(data["station_id"])
@@ -110,9 +108,9 @@ class ProductionSettlementFetcher:
         except (KeyError, TypeError, ValueError) as exc:
             raise SettlementFetchError("weather_settlement_contract_invalid") from exc
         zone = ZoneInfo(timezone)
-        window_end = datetime.combine(
-            market_date + timedelta(days=1), time.min, zone
-        ).astimezone(UTC)
+        window_end = datetime.combine(market_date + timedelta(days=1), time.min, zone).astimezone(
+            UTC
+        )
         if datetime.now(UTC) < window_end:
             raise SettlementFetchError("weather_reporting_window_incomplete")
         async with self.sessions() as session:
@@ -175,8 +173,6 @@ class ProductionSettlementFetcher:
                 "bucket_label": bucket.label,
             },
             provider_version="persisted-observations-v1",
-            quality_flags=tuple(
-                dict.fromkeys(flag for row in rows for flag in row.quality_flags)
-            ),
+            quality_flags=tuple(dict.fromkeys(flag for row in rows for flag in row.quality_flags)),
             license_metadata={"evidence_role": "settlement", "source": source},
         )

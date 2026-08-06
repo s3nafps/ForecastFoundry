@@ -373,8 +373,7 @@ async def load_day_observations(
     return tuple(
         row
         for row in rows
-        if row.air_temperature is not None
-        and row.observed_at.astimezone(zone).date() == local_date
+        if row.air_temperature is not None and row.observed_at.astimezone(zone).date() == local_date
     )
 
 
@@ -495,65 +494,61 @@ class AviationWeatherObservations:
 Then in `app/main.py`, inside `create_app` lifespan, after `scheduled_settlement` is defined, add:
 
 ```python
-        async def scheduled_observation_ingest() -> dict[str, object]:
-            stations_by_id = {station.station_id: station for station in stations.values()}
+async def scheduled_observation_ingest() -> dict[str, object]:
+    stations_by_id = {station.station_id: station for station in stations.values()}
+    async with sessions() as session:
+        contracts = (
+            await session.scalars(select(DomainContract).where(DomainContract.domain == "weather"))
+        ).all()
+    ingested_total = 0
+    errors = 0
+    for contract in contracts:
+        if contract.expiry is None or contract.expiry - datetime.now(UTC) > timedelta(
+            hours=resolved.observation_blend_hours
+        ):
+            continue
+        data = contract.contract_data
+        station_id = str(data.get("station_id", ""))
+        if station_id not in stations_by_id:
+            continue
+        source = str(contract.resolution_source)
+        local_date = datetime.fromisoformat(str(data.get("local_date"))).date()
+        try:
+            rows = await aviation_weather.fetch(station_id, local_date)
+        except Exception as exc:
+            errors += 1
             async with sessions() as session:
-                contracts = (
-                    await session.scalars(
-                        select(DomainContract).where(DomainContract.domain == "weather")
+                session.add(
+                    ProviderError(
+                        provider="aviation_weather",
+                        operation="observe",
+                        error_type=type(exc).__name__,
+                        message=str(exc),
+                        details={},
+                        retryable=True,
+                        occurred_at=datetime.now(UTC),
                     )
-                ).all()
-            ingested_total = 0
-            errors = 0
-            for contract in contracts:
-                if contract.expiry is None or contract.expiry - datetime.now(UTC) > timedelta(
-                    hours=resolved.observation_blend_hours
-                ):
-                    continue
-                data = contract.contract_data
-                station_id = str(data.get("station_id", ""))
-                if station_id not in stations_by_id:
-                    continue
-                source = str(contract.resolution_source)
-                local_date = datetime.fromisoformat(str(data.get("local_date"))).date()
-                try:
-                    rows = await aviation_weather.fetch(station_id, local_date)
-                except Exception as exc:
-                    errors += 1
-                    async with sessions() as session:
-                        session.add(
-                            ProviderError(
-                                provider="aviation_weather",
-                                operation="observe",
-                                error_type=type(exc).__name__,
-                                message=str(exc),
-                                details={},
-                                retryable=True,
-                                occurred_at=datetime.now(UTC),
-                            )
-                        )
-                        await session.commit()
-                    continue
-                if not rows:
-                    continue
-                async with sessions() as session:
-                    ingested_total += await ingest_observations(
-                        session,
-                        station_id=station_id,
-                        source=source,
-                        rows=rows,
-                        retrieved_at=datetime.now(UTC),
-                    )
-                    await session.commit()
-            return {"status": "completed", "ingested": ingested_total, "errors": errors}
+                )
+                await session.commit()
+            continue
+        if not rows:
+            continue
+        async with sessions() as session:
+            ingested_total += await ingest_observations(
+                session,
+                station_id=station_id,
+                source=source,
+                rows=rows,
+                retrieved_at=datetime.now(UTC),
+            )
+            await session.commit()
+    return {"status": "completed", "ingested": ingested_total, "errors": errors}
 ```
 
 Instantiate the adapter in the lifespan setup (next to the other adapters):
 
 ```python
-        aviation_weather = AviationWeatherObservations(
-            provider_http, resolved.aviation_weather_api_url
-        )
+aviation_weather = AviationWeatherObservations(provider_http, resolved.aviation_weather_api_url)
 ```
 
 Register the job in the scheduler block alongside `scheduled_settlement`:
@@ -845,6 +840,7 @@ Revision ID: 0009
 Revises: 0008
 Create Date: 2026-08-06
 """
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -882,42 +878,41 @@ In `app/config.py`, add after `observation_poll_seconds`:
 In `app/worker.py`, in `scan_once`, replace the member-aggregation block (currently lines ~289-300) with observation-aware logic. Before building `daily_members`, insert:
 
 ```python
-            blend_applied = False
-            observations_used = 0
-            observations = ()
-            assert normalized.measurement == "daily_max_temperature"
-            within_blend = (
-                source_event.end_date is not None
-                and source_event.end_date - now <= timedelta(hours=settings.observation_blend_hours)
-            )
-            if within_blend:
-                observations = await load_day_observations(
-                    session,
-                    station_id=normalized.station_id,
-                    source=normalized.resolution_source,
-                    local_date=normalized.local_date,
-                    timezone=normalized.timezone,
-                )
-            if within_blend and len(observations) >= settings.observation_min_count:
-                observations_used = len(observations)
-                blend_applied = True
-                forecasts = tuple(
-                    forecast.model_copy(
+blend_applied = False
+observations_used = 0
+observations = ()
+assert normalized.measurement == "daily_max_temperature"
+within_blend = source_event.end_date is not None and source_event.end_date - now <= timedelta(
+    hours=settings.observation_blend_hours
+)
+if within_blend:
+    observations = await load_day_observations(
+        session,
+        station_id=normalized.station_id,
+        source=normalized.resolution_source,
+        local_date=normalized.local_date,
+        timezone=normalized.timezone,
+    )
+if within_blend and len(observations) >= settings.observation_min_count:
+    observations_used = len(observations)
+    blend_applied = True
+    forecasts = tuple(
+        forecast.model_copy(
+            update={
+                "members": tuple(
+                    member.model_copy(
                         update={
-                            "members": tuple(
-                                member.model_copy(
-                                    update={
-                                        "points": apply_observations_to_points(
-                                            member.points, observations, now=now
-                                        )
-                                    }
-                                )
-                                for member in forecast.members
+                            "points": apply_observations_to_points(
+                                member.points, observations, now=now
                             )
                         }
                     )
-                    for forecast in forecasts
+                    for member in forecast.members
                 )
+            }
+        )
+        for forecast in forecasts
+    )
 ```
 
 Add imports at the top of `app/worker.py`:
@@ -949,18 +944,20 @@ Pass the observations state into the `ProbabilityEstimate` row (currently ~line 
 Set the candidate gates (currently `observations_required=False, observations_stale=False` at ~line 399):
 
 ```python
-                    observations_required=within_blend,
-                    observations_stale=within_blend and not blend_applied,
+observations_required = (within_blend,)
+observations_stale = (within_blend and not blend_applied,)
 ```
 
 Replace the alert observation summary (currently `observation_summary="not collected in temperature milestone"`):
 
 ```python
-                    observation_summary=(
-                        f"{observations_used} hourly observations blended"
-                        if blend_applied
-                        else "no observations blended"
-                    ),
+observation_summary = (
+    (
+        f"{observations_used} hourly observations blended"
+        if blend_applied
+        else "no observations blended"
+    ),
+)
 ```
 
 Add `timedelta` and the two observation imports to `app/worker.py`, and `observation_blend_hours` / `observation_min_count` to `.env.example`:
@@ -1075,29 +1072,27 @@ Expected: FAIL, `KeyError: 'model_probabilities'` or empty dict.
 Before the `Signal(...)` construction (after `probabilities` is computed and forecasts are finalized, including post-blend), compute per-model outcome probabilities:
 
 ```python
-            model_probabilities: dict[str, float] = {}
-            for forecast in forecasts:
-                model_members = tuple(
-                    MemberDailyValue(
-                        model=forecast.model,
-                        member_id=member.member_id,
-                        value=daily_maximum(
-                            member.points, normalized.local_date, normalized.timezone
-                        ),
-                        exclusion_reason=None,
-                    )
-                    for member in forecast.members
-                )
-                per_model = calculate_probabilities(
-                    model_members,
-                    normalized.buckets,
-                    rounding_method=normalized.rounding_method,
-                    unit=normalized.unit,
-                    model_weights={},
-                )
-                model_probabilities[forecast.model] = float(
-                    per_model.outcome_probabilities.get(source_market.group_item_title, 0.0)
-                )
+model_probabilities: dict[str, float] = {}
+for forecast in forecasts:
+    model_members = tuple(
+        MemberDailyValue(
+            model=forecast.model,
+            member_id=member.member_id,
+            value=daily_maximum(member.points, normalized.local_date, normalized.timezone),
+            exclusion_reason=None,
+        )
+        for member in forecast.members
+    )
+    per_model = calculate_probabilities(
+        model_members,
+        normalized.buckets,
+        rounding_method=normalized.rounding_method,
+        unit=normalized.unit,
+        model_weights={},
+    )
+    model_probabilities[forecast.model] = float(
+        per_model.outcome_probabilities.get(source_market.group_item_title, 0.0)
+    )
 ```
 
 Extend the `signal_data` dict (currently at ~line 469) with:
@@ -1257,9 +1252,8 @@ def extract_samples(
 
 def model_brier(samples: Mapping[str, list[ModelSample]]) -> dict[str, Decimal]:
     return {
-        model: sum(
-            (sample.probability - Decimal(int(sample.won))) ** 2 for sample in entries
-        ) / Decimal(len(entries))
+        model: sum((sample.probability - Decimal(int(sample.won))) ** 2 for sample in entries)
+        / Decimal(len(entries))
         for model, entries in samples.items()
     }
 
@@ -1277,9 +1271,7 @@ def compute_weights(
     inverse = {model: Decimal("1") / score for model, score in brier.items()}
     total = sum(inverse.values())
     weights = {model: float(weight / total) for model, weight in inverse.items()}
-    blend_brier = sum(
-        brier[model] * Decimal(str(weights[model])) for model in brier
-    )
+    blend_brier = sum(brier[model] * Decimal(str(weights[model])) for model in brier)
     if baseline - blend_brier < min_improvement * baseline:
         return None
     return weights
@@ -1292,9 +1284,7 @@ async def load_model_weights(session: AsyncSession) -> dict[str, float]:
     return {str(model): float(weight) for model, weight in setting.value.items()}
 
 
-async def store_model_weights(
-    session: AsyncSession, weights: Mapping[str, float]
-) -> None:
+async def store_model_weights(session: AsyncSession, weights: Mapping[str, float]) -> None:
     setting = await session.get(ApplicationSetting, WEIGHTS_KEY)
     if setting is None:
         setting = ApplicationSetting(key=WEIGHTS_KEY, value={})
@@ -1331,51 +1321,43 @@ from app.services.model_weights import (
 Add a method after `run_settlement_job`:
 
 ```python
-    async def run_calibration(
-        self, *, min_samples: int = 30, min_improvement: Decimal = Decimal("0.05")
-    ) -> dict[str, object]:
-        async with self.sessions() as session:
-            settlements = (await session.scalars(select(PaperSettlement))).all()
-            if not settlements:
-                return {"status": "no_settlements", "promoted": False}
-            position_ids = [row.position_id for row in settlements]
-            positions = (
-                await session.scalars(
-                    select(PaperPosition).where(PaperPosition.id.in_(position_ids))
-                )
-            ).all()
-            position_by_id = {row.id: row for row in positions}
-            signal_ids = [position_by_id[row.position_id].signal_id for row in settlements]
-            signals = (
-                await session.scalars(
-                    select(Signal).where(Signal.id.in_(signal_ids))
-                )
-            ).all()
-            signal_by_id = {row.id: row for row in signals}
-            pairs: list[tuple[dict[str, object], bool]] = []
-            for settlement in settlements:
-                position = position_by_id.get(settlement.position_id)
-                if position is None:
-                    continue
-                signal = signal_by_id.get(position.signal_id)
-                if signal is None:
-                    continue
-                pairs.append((signal.signal_data, settlement.won))
-            samples = extract_samples(pairs)
-            weights = compute_weights(
-                samples, min_samples=min_samples, min_improvement=min_improvement
-            )
-            if weights is None:
-                return {"status": "not_promoted", "promoted": False, "samples": len(samples)}
-            await store_model_weights(session, weights)
-            await session.commit()
-            return {
-                "status": "promoted",
-                "promoted": True,
-                "key": WEIGHTS_KEY,
-                "weights": weights,
-                "samples": sum(len(entries) for entries in samples.values()),
-            }
+async def run_calibration(
+    self, *, min_samples: int = 30, min_improvement: Decimal = Decimal("0.05")
+) -> dict[str, object]:
+    async with self.sessions() as session:
+        settlements = (await session.scalars(select(PaperSettlement))).all()
+        if not settlements:
+            return {"status": "no_settlements", "promoted": False}
+        position_ids = [row.position_id for row in settlements]
+        positions = (
+            await session.scalars(select(PaperPosition).where(PaperPosition.id.in_(position_ids)))
+        ).all()
+        position_by_id = {row.id: row for row in positions}
+        signal_ids = [position_by_id[row.position_id].signal_id for row in settlements]
+        signals = (await session.scalars(select(Signal).where(Signal.id.in_(signal_ids)))).all()
+        signal_by_id = {row.id: row for row in signals}
+        pairs: list[tuple[dict[str, object], bool]] = []
+        for settlement in settlements:
+            position = position_by_id.get(settlement.position_id)
+            if position is None:
+                continue
+            signal = signal_by_id.get(position.signal_id)
+            if signal is None:
+                continue
+            pairs.append((signal.signal_data, settlement.won))
+        samples = extract_samples(pairs)
+        weights = compute_weights(samples, min_samples=min_samples, min_improvement=min_improvement)
+        if weights is None:
+            return {"status": "not_promoted", "promoted": False, "samples": len(samples)}
+        await store_model_weights(session, weights)
+        await session.commit()
+        return {
+            "status": "promoted",
+            "promoted": True,
+            "key": WEIGHTS_KEY,
+            "weights": weights,
+            "samples": sum(len(entries) for entries in samples.values()),
+        }
 ```
 
 `app/services/application.py` does not import `Decimal` today; add `from decimal import Decimal` to its imports.
@@ -1587,9 +1569,7 @@ class ResearchIngestError(ValueError):
     pass
 
 
-def parse_github_issue(
-    raw: Mapping[str, object], *, retrieved_at: datetime
-) -> ResearchDocument:
+def parse_github_issue(raw: Mapping[str, object], *, retrieved_at: datetime) -> ResearchDocument:
     number = raw.get("number")
     title = raw.get("title")
     if number is None or title is None:
@@ -1646,9 +1626,7 @@ async def ingest_github_issues(
     return inserted
 
 
-async def fetch_github_issues(
-    http: object, *, repo: str, since: datetime
-) -> Mapping[str, object]:
+async def fetch_github_issues(http: object, *, repo: str, since: datetime) -> Mapping[str, object]:
     payload = await http.request_json(  # type: ignore[attr-defined]
         "GET",
         "https://api.github.com/search/issues",

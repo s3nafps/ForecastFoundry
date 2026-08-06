@@ -168,9 +168,7 @@ def create_app(
                 if contract.expiry is None:
                     continue
                 now = datetime.now(UTC)
-                if contract.expiry - now > timedelta(
-                    hours=resolved.observation_blend_hours
-                ):
+                if contract.expiry - now > timedelta(hours=resolved.observation_blend_hours):
                     continue
                 if contract.expiry < now - timedelta(hours=1):
                     continue

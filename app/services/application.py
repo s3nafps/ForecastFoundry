@@ -311,11 +311,7 @@ class ApplicationServices:
                 position = position_by_id.get(row.position_id)
                 if position is not None:
                     signal_ids.append(position.signal_id)
-            signals = (
-                await session.scalars(
-                    select(Signal).where(Signal.id.in_(signal_ids))
-                )
-            ).all()
+            signals = (await session.scalars(select(Signal).where(Signal.id.in_(signal_ids)))).all()
             signal_by_id = {row.id: row for row in signals}
             pairs: list[tuple[dict[str, object], bool]] = []
             for settlement in settlements:

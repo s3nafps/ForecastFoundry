@@ -27,9 +27,7 @@ def test_provider_health_marks_stale_data() -> None:
     registry = ProviderRegistry.default()
     now = datetime(2026, 8, 3, 12, tzinfo=UTC)
 
-    health = registry.health(
-        "coinbase", retrieved_at=now - timedelta(minutes=10), now=now
-    )
+    health = registry.health("coinbase", retrieved_at=now - timedelta(minutes=10), now=now)
 
     assert health.healthy is False
     assert health.reason == "stale"

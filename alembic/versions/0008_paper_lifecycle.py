@@ -124,8 +124,7 @@ def downgrade() -> None:
     connection = op.get_bind()
     incompatible_checks = {
         "unrepresentable positions": (
-            "SELECT COUNT(*) FROM paper_positions "
-            "WHERE market_id IS NULL OR outcome_id IS NULL"
+            "SELECT COUNT(*) FROM paper_positions WHERE market_id IS NULL OR outcome_id IS NULL"
         ),
         "execution decisions": "SELECT COUNT(*) FROM paper_execution_decisions",
         "lifecycle orders": (
