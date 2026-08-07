@@ -23,19 +23,21 @@ def candles(count: int = 5) -> list[dict[str, object]]:
     ]
 
 
-def test_normalizes_out_of_order_candles_and_returns_log_returns() -> None:
+def test_normalizes_descending_coinbase_candles_and_returns_log_returns() -> None:
     rows = candles()
-    series = normalize_candles("coinbase", [rows[2], rows[0], rows[1], rows[3], rows[4]], now=NOW)
+    series = normalize_candles("coinbase", tuple(reversed(rows)), now=NOW)
 
     assert [c.close for c in series.candles] == [
         Decimal("100"),
         Decimal("101"),
         Decimal("102"),
         Decimal("103"),
-        Decimal("104"),
     ]
-    assert len(series.log_returns) == 4
-    assert "out_of_order_sorted" in series.quality_flags
+    assert len(series.log_returns) == 3
+    assert series.quality_flags == (
+        "source_descending_reversed",
+        "incomplete_current_candle_removed",
+    )
 
 
 def test_rejects_duplicate_and_stale_candles() -> None:
@@ -44,7 +46,7 @@ def test_rejects_duplicate_and_stale_candles() -> None:
 
     stale = [{"timestamp": NOW - timedelta(days=2), "close": Decimal("100")}]
     with pytest.raises(CryptoDataQualityError, match="stale_data"):
-        normalize_candles("coinbase", stale, now=NOW, freshness=timedelta(hours=1))
+        normalize_candles("coinbase", stale, now=NOW, freshness=timedelta(hours=1), min_history=1)
 
 
 def test_rejects_insufficient_history() -> None:
@@ -83,3 +85,47 @@ def test_seeded_bootstrap_and_probability_are_reproducible() -> None:
 
 def test_ewma_volatility_shrinks_toward_zero_drift() -> None:
     assert ewma_volatility((Decimal("0"), Decimal("0")), decay=Decimal("0.94")) == Decimal("0")
+
+
+def test_probability_honors_strict_and_inclusive_equality() -> None:
+    strict = estimate_crypto_probability(
+        (Decimal("0"),),
+        current_price=Decimal("100"),
+        comparison="above",
+        threshold=Decimal("100"),
+        comparison_inclusive=False,
+        rounding_increment=Decimal("1"),
+        horizon=1,
+        seed=1,
+        samples=20,
+    )
+    inclusive = estimate_crypto_probability(
+        (Decimal("0"),),
+        current_price=Decimal("100"),
+        comparison="above",
+        threshold=Decimal("100"),
+        comparison_inclusive=True,
+        rounding_increment=Decimal("1"),
+        horizon=1,
+        seed=1,
+        samples=20,
+    )
+
+    assert strict.probability == Decimal("0")
+    assert inclusive.probability == Decimal("1")
+
+
+def test_probability_rounds_before_comparison() -> None:
+    rounded = estimate_crypto_probability(
+        (Decimal("0"),),
+        current_price=Decimal("99.6"),
+        comparison="above",
+        threshold=Decimal("100"),
+        comparison_inclusive=True,
+        rounding_increment=Decimal("1"),
+        horizon=1,
+        seed=1,
+        samples=20,
+    )
+
+    assert rounded.probability == Decimal("1")

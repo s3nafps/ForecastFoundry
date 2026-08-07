@@ -6,8 +6,8 @@ Forecasts and probabilities are estimates, not financial advice or guarantees. F
 
 ## Interfaces
 
-- `forecastfoundry scan|backtest|status|reconcile|pause|mcp`: stable local CLI commands.
-- `http://127.0.0.1:8000`: read-only dashboard and `/api/v1` status, evidence, reconciliation, and operator controls.
+- `forecastfoundry scan|backtest|status|reconcile|pause|calibrate|mcp`: stable local CLI commands.
+- `http://127.0.0.1:8000`: read-only dashboard and `/api/v1` status, evidence, reconciliation, research, and operator controls.
 - `forecastfoundry mcp`: one restricted MCP server for research, status, reconciliation, and audited pause/resume. It exposes no signer, wallet transfer, arbitrary HTTP, or risk-limit mutation tool.
 - `integrations/` contains equivalent OpenClaw, Codex CLI, Claude Code, and Hermes configuration examples. They contain no wallet or provider secrets.
 
@@ -32,6 +32,20 @@ Run `python -m pytest -q` and `python -m ruff check .` before deployment. Docker
 Keyless public providers include Open-Meteo, NWS, AviationWeather, MET Norway, Coinbase, Binance, and Kraken. WeatherAPI, Visual Crossing, Tomorrow.io, OpenWeather, Reddit, X, and GitHub are optional user-supplied integrations; keys are never discovered or generated. Research features remain feature-only until a versioned walk-forward test proves improvement over the deterministic baseline.
 
 Every accepted contract records its named resolution source, quote/units, UTC expiry, price definition, rounding, provenance, and original rules. Missing or conflicting terms are rejected with machine-readable reasons. Evidence stores provider metadata, timestamps, hashes, freshness, quality flags, and attribution.
+
+## Observation-informed probabilities
+
+Weather forecasts near expiry are grounded in real observations. While a weather contract's expiry is within `OBSERVATION_BLEND_HOURS` (default 36) of now, the scheduler ingests hourly METAR observations from AviationWeather (`AVIATION_WEATHER_API_URL`, default `https://aviationweather.gov/api/data/metar`) and stops after a 1-hour post-expiry grace. In the weather scan, ensemble member forecast points at or before now are replaced by the nearest observation within a 1-hour window, then daily-max and bucket probabilities are recomputed from the blended members.
+
+A blend is applied only when at least `OBSERVATION_MIN_COUNT` (default 6) observations are available for that station/day; inside the blend horizon without enough observations, candidates are rejected as `observations_stale` instead of predicted. Each `ProbabilityEstimate` records `observations_used` and `blend_applied`. Polling runs at `observation_poll_seconds`.
+
+## Calibration-based model weighting
+
+`forecastfoundry calibrate` (options `--min-samples 30 --min-improvement 0.05`) computes per-model Brier scores from settled paper signals, using the `model_probabilities` snapshotted at signal time. Weights are promoted and persisted under the `model_weights:weather` application setting only when every model has at least 30 settled samples AND the walk-forward blend Brier beats the equal-weight baseline by at least 5%; otherwise equal weights remain in effect. The settlement job re-runs calibration best-effort after each run.
+
+## Research evidence
+
+The scheduler ingests public GitHub issue-search results (repositories configurable per call) into the `research_documents` table, sanitized and hashed, with feature-only provenance (class 3): research never authorizes a trade and never overrides resolution evidence. Read-only access is exposed at `GET /api/v1/research` and the `/research` dashboard page. X/Reddit remain future work pending user-supplied credentials; no placeholder code ships.
 
 ## Live execution checklist
 

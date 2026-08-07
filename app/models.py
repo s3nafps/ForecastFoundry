@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -201,15 +202,40 @@ class ProbabilityEstimate(Base):
     ensemble_spread: Mapped[float] = mapped_column(Float)
     uncertainty_score: Mapped[float] = mapped_column(Float)
     model_weights: Mapped[dict[str, float]] = mapped_column(JSON)
+    observations_used: Mapped[int] = mapped_column(Integer, default=0)
+    blend_applied: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Signal(Base):
     __tablename__ = "signals"
-    __table_args__ = (Index("ix_signals_market_generated", "market_id", "generated_at"),)
+    __table_args__ = (
+        Index("ix_signals_market_generated", "market_id", "generated_at"),
+        CheckConstraint(
+            "model_probability >= 0 AND model_probability <= 1",
+            name="ck_signals_model_probability",
+        ),
+        CheckConstraint(
+            "executable_ask >= 0 AND executable_ask <= 1",
+            name="ck_signals_executable_ask",
+        ),
+        CheckConstraint("side IS NULL OR side = 'buy'", name="ck_signals_side"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    market_id: Mapped[int] = mapped_column(ForeignKey("markets.id", ondelete="CASCADE"))
-    outcome_id: Mapped[int] = mapped_column(ForeignKey("outcomes.id", ondelete="CASCADE"))
+    market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="CASCADE"))
+    outcome_id: Mapped[int | None] = mapped_column(ForeignKey("outcomes.id", ondelete="CASCADE"))
+    contract_id: Mapped[int | None] = mapped_column(
+        ForeignKey("domain_contracts.id", ondelete="CASCADE"), index=True
+    )
+    prediction_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prediction_runs.id", ondelete="CASCADE"), index=True
+    )
+    evidence_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evidence_snapshots.id", ondelete="RESTRICT"), index=True
+    )
+    side: Mapped[str | None] = mapped_column(String(8))
+    outcome_label: Mapped[str | None] = mapped_column(String(16))
+    token_id: Mapped[str | None] = mapped_column(String(100))
     generated_at: Mapped[datetime] = mapped_column(UTCDateTime())
     model_probability: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     executable_ask: Mapped[Decimal] = mapped_column(Numeric(18, 8))
@@ -217,6 +243,7 @@ class Signal(Base):
     usable_edge: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     buffers: Mapped[dict[str, str]] = mapped_column(JSON)
     fingerprint: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    freshness_seconds: Mapped[int | None] = mapped_column(Integer)
     alerted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     alert_error: Mapped[str | None] = mapped_column(Text)
     signal_data: Mapped[dict[str, object]] = mapped_column(JSON)
@@ -224,10 +251,40 @@ class Signal(Base):
 
 class RejectedSignal(Base):
     __tablename__ = "rejected_signals"
-    __table_args__ = (Index("ix_rejections_market_generated", "market_id", "generated_at"),)
+    __table_args__ = (
+        Index("ix_rejections_market_generated", "market_id", "generated_at"),
+        CheckConstraint(
+            "model_probability IS NULL OR (model_probability >= 0 AND model_probability <= 1)",
+            name="ck_rejected_signals_model_probability",
+        ),
+        CheckConstraint(
+            "executable_ask IS NULL OR (executable_ask >= 0 AND executable_ask <= 1)",
+            name="ck_rejected_signals_executable_ask",
+        ),
+        CheckConstraint("side IS NULL OR side = 'buy'", name="ck_rejected_signals_side"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))
+    contract_id: Mapped[int | None] = mapped_column(
+        ForeignKey("domain_contracts.id", ondelete="CASCADE"), index=True
+    )
+    prediction_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prediction_runs.id", ondelete="CASCADE"), index=True
+    )
+    evidence_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evidence_snapshots.id", ondelete="RESTRICT"), index=True
+    )
+    fingerprint: Mapped[str | None] = mapped_column(String(128), unique=True, index=True)
+    side: Mapped[str | None] = mapped_column(String(8))
+    outcome_label: Mapped[str | None] = mapped_column(String(16))
+    token_id: Mapped[str | None] = mapped_column(String(100))
+    model_probability: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
+    executable_ask: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
+    raw_edge: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
+    usable_edge: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
+    buffers: Mapped[dict[str, str] | None] = mapped_column(JSON)
+    freshness_seconds: Mapped[int | None] = mapped_column(Integer)
     generated_at: Mapped[datetime] = mapped_column(UTCDateTime())
     reasons: Mapped[list[str]] = mapped_column(JSON)
     candidate_data: Mapped[dict[str, object]] = mapped_column(JSON)
@@ -235,32 +292,74 @@ class RejectedSignal(Base):
 
 class PaperPosition(Base):
     __tablename__ = "paper_positions"
-    __table_args__ = (Index("ix_paper_positions_status", "status"),)
+    __table_args__ = (
+        Index("ix_paper_positions_status", "status"),
+        CheckConstraint("entry_price > 0 AND entry_price <= 1", name="ck_paper_position_price"),
+        CheckConstraint("shares > 0", name="ck_paper_position_shares"),
+        CheckConstraint("amount > 0", name="ck_paper_position_amount"),
+        CheckConstraint("fees >= 0", name="ck_paper_position_fees"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"), unique=True)
-    market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), index=True)
-    outcome_id: Mapped[int] = mapped_column(ForeignKey("outcomes.id"))
+    execution_order_id: Mapped[int | None] = mapped_column(
+        ForeignKey("execution_orders.id", ondelete="RESTRICT"), unique=True
+    )
+    market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id"), index=True)
+    outcome_id: Mapped[int | None] = mapped_column(ForeignKey("outcomes.id"))
     entered_at: Mapped[datetime] = mapped_column(UTCDateTime())
     entry_price: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     amount: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     shares: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     fees: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     status: Mapped[str] = mapped_column(String(24), default="open")
+    current_mark: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
+    unrealized_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 8), default=Decimal("0"))
+    realized_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 8), default=Decimal("0"))
     signal_data: Mapped[dict[str, object]] = mapped_column(JSON)
 
 
 class PaperSettlement(Base):
     __tablename__ = "paper_settlements"
+    __table_args__ = (CheckConstraint("payout >= 0", name="ck_paper_settlement_payout"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     position_id: Mapped[int] = mapped_column(ForeignKey("paper_positions.id"), unique=True)
+    evidence_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evidence_snapshots.id", ondelete="RESTRICT")
+    )
+    request_id: Mapped[str | None] = mapped_column(String(120), unique=True)
+    actor: Mapped[str | None] = mapped_column(String(120))
+    request_fingerprint: Mapped[str | None] = mapped_column(String(128))
+    outcome_label: Mapped[str | None] = mapped_column(String(16))
     settled_at: Mapped[datetime] = mapped_column(UTCDateTime())
     won: Mapped[bool] = mapped_column(Boolean)
     payout: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     realized_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 8))
     brier_score: Mapped[float] = mapped_column(Float)
     resolution_data: Mapped[dict[str, object]] = mapped_column(JSON)
+
+
+class PaperExecutionDecision(Base):
+    """Immutable, idempotent approval or rejection for one accepted signal."""
+
+    __tablename__ = "paper_execution_decisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    signal_id: Mapped[int] = mapped_column(
+        ForeignKey("signals.id", ondelete="CASCADE"), unique=True
+    )
+    request_id: Mapped[str | None] = mapped_column(String(120), unique=True)
+    actor: Mapped[str | None] = mapped_column(String(120))
+    request_fingerprint: Mapped[str | None] = mapped_column(String(128))
+    approved: Mapped[bool] = mapped_column(Boolean)
+    reasons: Mapped[list[str]] = mapped_column(JSON)
+    requested_shares: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    approved_shares: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    balance_before: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    exposure_before: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    daily_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class ProviderError(Base):
@@ -285,9 +384,63 @@ class ApplicationSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
 
+class ExecutionControlState(Base):
+    """The single durable source of truth for new-entry control."""
+
+    __tablename__ = "execution_control_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    paused: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    request_id: Mapped[str] = mapped_column(String(80))
+    actor: Mapped[str] = mapped_column(String(120))
+    reason: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class ExecutionControlRequest(Base):
+    """A request ID bound to one normalized control transition and its result."""
+
+    __tablename__ = "execution_control_requests"
+
+    request_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    target_paused: Mapped[bool] = mapped_column(Boolean)
+    actor: Mapped[str] = mapped_column(String(120))
+    operation: Mapped[str] = mapped_column(String(20))
+    reason: Mapped[str] = mapped_column(Text)
+    expected_revision: Mapped[int | None] = mapped_column(Integer)
+    result_paused: Mapped[bool] = mapped_column(Boolean)
+    result_revision: Mapped[int] = mapped_column(Integer)
+    result_actor: Mapped[str] = mapped_column(String(120))
+    result_reason: Mapped[str] = mapped_column(Text)
+    result_updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class OperatorCredential(Base):
+    __tablename__ = "operator_credentials"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    token_hash: Mapped[str] = mapped_column(String(256))
+    permissions: Mapped[list[str]] = mapped_column(JSON)
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    rotated_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    blocked_until: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
 class DomainContract(TimestampMixin, Base):
     __tablename__ = "domain_contracts"
-    __table_args__ = (Index("ix_domain_contracts_domain_expiry", "domain", "expiry"),)
+    __table_args__ = (
+        Index("ix_domain_contracts_domain_expiry", "domain", "expiry"),
+        UniqueConstraint(
+            "market_external_id",
+            "domain",
+            name="uq_domain_contracts_market_external_id_domain",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))
@@ -315,12 +468,30 @@ class ProviderRegistryEntry(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, object]] = mapped_column(JSON)
 
 
+class ProviderHealthSnapshot(Base):
+    __tablename__ = "provider_health_snapshots"
+    __table_args__ = (Index("ix_provider_health_name_checked", "provider", "checked_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(80), index=True)
+    checked_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    healthy: Mapped[bool] = mapped_column(Boolean)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32))
+    reason: Mapped[str] = mapped_column(String(160))
+    metadata_json: Mapped[dict[str, object]] = mapped_column(JSON)
+
+
 class EvidenceSnapshot(Base):
     __tablename__ = "evidence_snapshots"
     __table_args__ = (Index("ix_evidence_provider_source_time", "provider", "source_timestamp"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))
+    contract_id: Mapped[int | None] = mapped_column(
+        ForeignKey("domain_contracts.id", ondelete="CASCADE"), index=True
+    )
+    fingerprint: Mapped[str | None] = mapped_column(String(128), unique=True, index=True)
     provider: Mapped[str] = mapped_column(String(80))
     provider_version: Mapped[str | None] = mapped_column(String(80))
     source_timestamp: Mapped[datetime | None] = mapped_column(UTCDateTime())
@@ -334,12 +505,22 @@ class EvidenceSnapshot(Base):
 
 class PredictionRun(Base):
     __tablename__ = "prediction_runs"
-    __table_args__ = (Index("ix_prediction_runs_market_generated", "market_id", "generated_at"),)
+    __table_args__ = (
+        Index("ix_prediction_runs_market_generated", "market_id", "generated_at"),
+        UniqueConstraint(
+            "contract_id",
+            "input_hash",
+            name="uq_prediction_runs_contract_input_hash",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))
     contract_id: Mapped[int | None] = mapped_column(
         ForeignKey("domain_contracts.id", ondelete="SET NULL")
+    )
+    evidence_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evidence_snapshots.id", ondelete="SET NULL"), index=True
     )
     generated_at: Mapped[datetime] = mapped_column(UTCDateTime())
     model_name: Mapped[str] = mapped_column(String(120))
@@ -371,6 +552,9 @@ class CalibrationMetric(Base):
     prediction_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("prediction_runs.id", ondelete="SET NULL")
     )
+    settlement_id: Mapped[int | None] = mapped_column(
+        ForeignKey("paper_settlements.id", ondelete="CASCADE"), unique=True
+    )
     model_name: Mapped[str] = mapped_column(String(120))
     window_start: Mapped[datetime] = mapped_column(UTCDateTime())
     window_end: Mapped[datetime] = mapped_column(UTCDateTime())
@@ -396,14 +580,22 @@ class ResearchDocument(Base):
 
 class ExecutionOrder(Base):
     __tablename__ = "execution_orders"
-    __table_args__ = (Index("ix_execution_orders_status_created", "status", "created_at"),)
+    __table_args__ = (
+        Index("ix_execution_orders_status_created", "status", "created_at"),
+        CheckConstraint("price > 0 AND price <= 1", name="ck_execution_order_price"),
+        CheckConstraint("size > 0", name="ck_execution_order_size"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))
     outcome_id: Mapped[int | None] = mapped_column(ForeignKey("outcomes.id", ondelete="SET NULL"))
+    signal_id: Mapped[int | None] = mapped_column(
+        ForeignKey("signals.id", ondelete="SET NULL"), unique=True
+    )
     mode: Mapped[str] = mapped_column(String(16), default="paper", index=True)
     provider: Mapped[str] = mapped_column(String(80))
     client_order_id: Mapped[str] = mapped_column(String(120), unique=True)
+    intent_fingerprint: Mapped[str | None] = mapped_column(String(128), unique=True)
     provider_order_id: Mapped[str | None] = mapped_column(String(160), unique=True)
     side: Mapped[str] = mapped_column(String(8))
     price: Mapped[Decimal] = mapped_column(Numeric(18, 8))
@@ -418,7 +610,12 @@ class ExecutionOrder(Base):
 
 class ExecutionFill(Base):
     __tablename__ = "execution_fills"
-    __table_args__ = (Index("ix_execution_fills_order_filled", "execution_order_id", "filled_at"),)
+    __table_args__ = (
+        Index("ix_execution_fills_order_filled", "execution_order_id", "filled_at"),
+        CheckConstraint("price > 0 AND price <= 1", name="ck_execution_fill_price"),
+        CheckConstraint("size > 0", name="ck_execution_fill_size"),
+        CheckConstraint("fee >= 0", name="ck_execution_fill_fee"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     execution_order_id: Mapped[int] = mapped_column(
@@ -455,6 +652,8 @@ class KillSwitchEvent(Base):
     reason: Mapped[str] = mapped_column(Text)
     triggered_at: Mapped[datetime] = mapped_column(UTCDateTime())
     metadata_json: Mapped[dict[str, object]] = mapped_column(JSON)
+    request_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    revision: Mapped[int | None] = mapped_column(Integer)
 
 
 class KeystoreMetadata(Base):

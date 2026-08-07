@@ -1,0 +1,23 @@
+[
+  {
+    "market": "crypto-condition",
+    "asset_id": "yes-token",
+    "timestamp": "1785760200000",
+    "bids": [{"price": "0.38", "size": "100"}],
+    "asks": [
+      {"price": "0.50", "size": "3"},
+      {"price": "0.40", "size": "2"}
+    ],
+    "min_order_size": "5",
+    "tick_size": "0.01"
+  },
+  {
+    "market": "crypto-condition",
+    "asset_id": "no-token",
+    "timestamp": "1785760200000",
+    "bids": [{"price": "0.63", "size": "100"}],
+    "asks": [{"price": "0.65", "size": "100"}],
+    "min_order_size": "5",
+    "tick_size": "0.01"
+  }
+]

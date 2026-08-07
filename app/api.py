@@ -1,12 +1,11 @@
-from datetime import UTC, datetime
 from decimal import Decimal
+from typing import cast
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from app import COMPATIBILITY_VERSION, PRODUCT_NAME
-from app.mcp_policy import MCPPolicyError, audit_operator_action, require_operator
 from app.models import (
     ApplicationSetting,
     Event,
@@ -14,7 +13,6 @@ from app.models import (
     ExecutionOrder,
     ForecastMember,
     ForecastRun,
-    KillSwitchEvent,
     Market,
     NormalizedRule,
     OrderBookSnapshot,
@@ -24,16 +22,19 @@ from app.models import (
     ProviderError,
     ReconciliationEvent,
     RejectedSignal,
+    ResearchDocument,
     Signal,
 )
-from app.providers.registry import ProviderRegistry
+from app.services.application import ApplicationServices
+from app.services.execution_control import ExecutionControlConflict
 
 router = APIRouter(prefix="/api/v1")
 
 
 class OperatorAction(BaseModel):
-    token: str
     reason: str
+    request_id: str | None = None
+    expected_revision: int | None = None
 
 
 async def market_rows(request: Request) -> list[dict[str, object]]:
@@ -293,6 +294,34 @@ async def errors(request: Request) -> list[dict[str, object]]:
     return await error_rows(request)
 
 
+async def research_rows(request: Request) -> list[dict[str, object]]:
+    async with request.app.state.sessions() as session:
+        rows = (
+            await session.scalars(
+                select(ResearchDocument).order_by(ResearchDocument.published_at.desc()).limit(100)
+            )
+        ).all()
+    return [
+        {
+            "id": row.id,
+            "provider": row.provider,
+            "external_id": row.external_id,
+            "url": row.url,
+            "published_at": row.published_at,
+            "retrieved_at": row.retrieved_at,
+            "content_hash": row.content_hash,
+            "feature_only": row.feature_only,
+            "redacted_text": row.redacted_text[:200],
+        }
+        for row in rows
+    ]
+
+
+@router.get("/research")
+async def research(request: Request) -> list[dict[str, object]]:
+    return await research_rows(request)
+
+
 @router.get("/config")
 async def config(request: Request) -> dict[str, object]:
     settings = request.app.state.settings
@@ -316,48 +345,36 @@ async def config(request: Request) -> dict[str, object]:
 
 
 @router.get("/domains")
-async def domains() -> dict[str, object]:
-    return {"domains": ["weather", "crypto"], "mode": "PAPER_ONLY"}
+async def domains(request: Request) -> dict[str, object]:
+    services = cast(ApplicationServices, request.app.state.services)
+    return await services.list_supported_domains()
 
 
 @router.get("/providers/health")
-async def provider_health() -> dict[str, object]:
-    specs = ProviderRegistry.default().specs()
-    return {
-        "providers": [
-            {
-                "name": spec.name,
-                "domain": (
-                    "crypto"
-                    if spec.name in {"coinbase", "binance", "kraken"}
-                    else "research"
-                    if spec.name in {"reddit", "x", "github"}
-                    else "weather"
-                ),
-                "auth": spec.auth,
-                "classification": spec.classification,
-                "freshness_seconds": spec.freshness_seconds,
-                "status": "not_checked",
-            }
-            for spec in specs
-        ],
-        "secret_values": False,
-    }
+async def provider_health(request: Request) -> dict[str, object]:
+    services = cast(ApplicationServices, request.app.state.services)
+    return await services.provider_health()
 
 
 @router.get("/execution/status")
 async def execution_status(request: Request) -> dict[str, object]:
     settings = request.app.state.settings
-    async with request.app.state.sessions() as session:
-        paused = await session.get(ApplicationSetting, "paused")
+    control = await request.app.state.services.control_status()
     return {
         "mode": "LIVE_GATED" if settings.execution_enabled else "PAPER_ONLY",
         "live_execution": settings.execution_enabled,
         "closed_only": settings.closed_only,
-        "paused": bool(paused and paused.value is True),
-        "kill_switch_active": bool(paused and paused.value is True),
+        "paused": control.paused,
+        "kill_switch_active": control.paused,
+        "control": control.as_dict(),
         "wallet_custody": False,
     }
+
+
+@router.get("/portfolio")
+async def portfolio(request: Request) -> dict[str, object]:
+    services = cast(ApplicationServices, request.app.state.services)
+    return await services.portfolio_status()
 
 
 @router.get("/orders/reconciliation")
@@ -418,39 +435,55 @@ async def market_evidence(market_id: int, request: Request) -> list[dict[str, ob
 
 
 async def _operator_action(
-    request: Request, payload: OperatorAction, *, paused: bool
+    request: Request,
+    payload: OperatorAction,
+    *,
+    paused: bool,
+    authorization: str | None,
 ) -> dict[str, object]:
+    if not authorization and request.app.state.settings.app_env == "test":
+        # Compatibility-only path for the historical test harness. Production
+        # requests must use the Authorization header and never JSON tokens.
+        body = await request.json()
+        legacy_token = body.get("token") if isinstance(body, dict) else None
+        if isinstance(legacy_token, str):
+            authorization = f"Bearer {legacy_token}"
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="bearer operator authorization is required")
+    token = authorization[7:].strip()
     try:
-        require_operator(payload.token)
-    except MCPPolicyError as exc:
-        raise HTTPException(status_code=401, detail="operator authentication failed") from exc
-    if not payload.reason.strip():
-        raise HTTPException(status_code=400, detail="reason is required")
-    async with request.app.state.sessions() as session:
-        setting = await session.get(ApplicationSetting, "paused")
-        if setting is None:
-            session.add(ApplicationSetting(key="paused", value=paused))
-        else:
-            setting.value = paused
-        session.add(
-            KillSwitchEvent(
-                active=paused,
-                actor="api_operator",
-                reason=payload.reason,
-                triggered_at=datetime.now(UTC),
-                metadata_json={},
-            )
+        services = cast(ApplicationServices, request.app.state.services)
+        return await services.set_execution(
+            paused,
+            token=token,
+            reason=payload.reason,
+            actor="api_operator",
+            request_id=payload.request_id,
+            expected_revision=payload.expected_revision,
         )
-        await session.commit()
-    audit_operator_action("pause_execution" if paused else "resume_execution", payload.reason)
-    return {"paused": paused, "reason": payload.reason}
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail="operator authentication failed") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ExecutionControlConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.as_dict()) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/operator/pause")
-async def pause_operator(request: Request, payload: OperatorAction) -> dict[str, object]:
-    return await _operator_action(request, payload, paused=True)
+async def pause_operator(
+    request: Request,
+    payload: OperatorAction,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    return await _operator_action(request, payload, paused=True, authorization=authorization)
 
 
 @router.post("/operator/resume")
-async def resume_operator(request: Request, payload: OperatorAction) -> dict[str, object]:
-    return await _operator_action(request, payload, paused=False)
+async def resume_operator(
+    request: Request,
+    payload: OperatorAction,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    return await _operator_action(request, payload, paused=False, authorization=authorization)

@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     polymarket_poll_seconds: int = Field(default=120, gt=0)
     weather_poll_seconds: int = Field(default=900, gt=0)
     observation_poll_seconds: int = Field(default=300, gt=0)
+    observation_blend_hours: int = Field(default=36, gt=0)
+    observation_min_count: int = Field(default=6, gt=0)
     min_rule_confidence: int = Field(default=90, ge=0, le=100)
     min_ensemble_members: int = Field(default=25, gt=0)
     min_usable_edge: Decimal = Field(default=Decimal("0.10"), ge=0, le=1)
@@ -42,10 +44,12 @@ class Settings(BaseSettings):
     polymarket_chain_id: int = Field(default=137, gt=0)
     polymarket_funder_address: str | None = None
     hermes_mcp_enabled: bool = True
+    scheduler_enabled: bool = True
     polymarket_websocket_enabled: bool = False
     gamma_api_url: str = "https://gamma-api.polymarket.com"
     clob_api_url: str = "https://clob.polymarket.com"
     open_meteo_api_url: str = "https://ensemble-api.open-meteo.com/v1/ensemble"
+    aviation_weather_api_url: str = "https://aviationweather.gov/api/data/metar"
     http_timeout_seconds: float = Field(default=20.0, gt=0)
     http_max_retries: int = Field(default=3, ge=0, le=10)
     provider_circuit_failures: int = Field(default=5, gt=0)

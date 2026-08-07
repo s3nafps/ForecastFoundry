@@ -1,6 +1,6 @@
 import hashlib
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings
 from app.domains.base import MarketInput
 from app.domains.registry import DomainRegistry
+from app.domains.weather import WeatherPlugin
 from app.models import (
     Event,
     ForecastMember,
@@ -37,8 +38,15 @@ from app.schemas import (
     SignalPolicy,
     Station,
 )
+from app.services.contracts import persist_domain_contract
 from app.services.forecast import ForecastProvider
-from app.services.paper import PaperTradingError, get_paper_balance, open_paper_position
+from app.services.model_weights import load_model_weights
+from app.services.observations import (
+    ObservedHour,
+    apply_observations_to_points,
+    load_day_observations,
+)
+from app.services.paper import PaperLifecycle, get_paper_balance
 from app.services.probability import calculate_probabilities, daily_maximum
 from app.services.rules import RuleNormalizationError, normalize_temperature_event
 from app.services.signals import evaluate_signal
@@ -211,12 +219,16 @@ async def scan_once(
             await session.commit()
         return
 
+    registry = DomainRegistry(plugins=(WeatherPlugin(stations=stations, overrides=overrides),))
+    async with sessions() as session:
+        weights = await load_model_weights(session)
     for source_event in events:
-        domain_route = DomainRegistry().route(
+        domain_route = registry.route(
             MarketInput(
                 market_id=source_event.id,
                 title=source_event.title,
                 description=source_event.description,
+                raw_data={"event": source_event.model_dump(mode="json")},
             )
         )
         if domain_route.domain != "weather":
@@ -227,6 +239,18 @@ async def scan_once(
             for source_market in source_event.markets:
                 market, yes = await _upsert_market(session, event, source_market)
                 markets[source_market.id] = (market, yes, source_market)
+            if not domain_route.accepted:
+                for market, _, _ in markets.values():
+                    session.add(
+                        RejectedSignal(
+                            market_id=market.id,
+                            generated_at=now,
+                            reasons=list(domain_route.reasons),
+                            candidate_data={"event_id": source_event.id},
+                        )
+                    )
+                await session.commit()
+                continue
             try:
                 normalized = normalize_temperature_event(
                     source_event, stations, overrides.get(source_event.id)
@@ -270,6 +294,43 @@ async def scan_once(
                 except Exception as exc:
                     await _provider_error(session, "weather", "forecast", exc, now)
 
+            blend_applied = False
+            observations_used = 0
+            observations: tuple[ObservedHour, ...] = ()
+            assert normalized.measurement == "daily_max_temperature"
+            within_blend = (
+                source_event.end_date is not None
+                and source_event.end_date - now <= timedelta(hours=settings.observation_blend_hours)
+            )
+            if within_blend:
+                observations = await load_day_observations(
+                    session,
+                    station_id=normalized.station_id,
+                    source=normalized.resolution_source,
+                    local_date=normalized.local_date,
+                    timezone=normalized.timezone,
+                )
+            if within_blend and len(observations) >= settings.observation_min_count:
+                observations_used = len(observations)
+                blend_applied = True
+                forecasts = [
+                    forecast.model_copy(
+                        update={
+                            "members": tuple(
+                                member.model_copy(
+                                    update={
+                                        "points": apply_observations_to_points(
+                                            member.points, observations, now=now
+                                        )
+                                    }
+                                )
+                                for member in forecast.members
+                            )
+                        }
+                    )
+                    for forecast in forecasts
+                ]
+
             daily_members: list[MemberDailyValue] = []
             for forecast in forecasts:
                 for member in forecast.members:
@@ -287,10 +348,18 @@ async def scan_once(
                 normalized.buckets,
                 rounding_method=normalized.rounding_method,
                 unit=normalized.unit,
-                model_weights={},
+                model_weights=weights,
             )
 
             for market, yes, source_market in markets.values():
+                contract_input = MarketInput(
+                    market_id=source_market.id,
+                    title=source_market.question,
+                    description=source_event.description,
+                    raw_data={"event": source_event.model_dump(mode="json")},
+                )
+                contract_route = registry.route(contract_input)
+                contract = await persist_domain_contract(session, contract_input, contract_route)
                 book = books_by_asset.get(yes.token_id)
                 if book:
                     session.add(
@@ -350,6 +419,8 @@ async def scan_once(
                         ensemble_spread=probabilities.ensemble_spread,
                         uncertainty_score=probabilities.uncertainty_score,
                         model_weights=probabilities.model_weights,
+                        observations_used=observations_used,
+                        blend_applied=blend_applied,
                     )
                 )
 
@@ -372,8 +443,8 @@ async def scan_once(
                     minimum_order_size=(book.minimum_order_size if book else None),
                     paper_balance=balance,
                     valid_members=probabilities.valid_members,
-                    observations_required=False,
-                    observations_stale=False,
+                    observations_required=within_blend,
+                    observations_stale=within_blend and not blend_applied,
                     critical_quality_flags=(),
                 )
                 buffers = EdgeBuffers(
@@ -424,9 +495,35 @@ async def scan_once(
                     )
                     continue
 
+                model_probabilities: dict[str, float] = {}
+                for forecast in forecasts:
+                    model_members = tuple(
+                        MemberDailyValue(
+                            model=forecast.model,
+                            member_id=member.member_id,
+                            value=daily_maximum(
+                                member.points, normalized.local_date, normalized.timezone
+                            ),
+                            exclusion_reason=None,
+                        )
+                        for member in forecast.members
+                    )
+                    per_model = calculate_probabilities(
+                        model_members,
+                        normalized.buckets,
+                        rounding_method=normalized.rounding_method,
+                        unit=normalized.unit,
+                        model_weights={},
+                    )
+                    model_probabilities[forecast.model] = float(
+                        per_model.outcome_probabilities.get(source_market.group_item_title, 0.0)
+                    )
+
                 signal = Signal(
                     market_id=market.id,
                     outcome_id=yes.id,
+                    contract_id=contract.id,
+                    outcome_label=source_market.group_item_title,
                     generated_at=now,
                     model_probability=probability,
                     executable_ask=book.best_ask,
@@ -439,29 +536,19 @@ async def scan_once(
                         "rule_risk": str(buffers.rule_risk),
                     },
                     fingerprint=fingerprint,
-                    signal_data={"event_id": source_event.id},
+                    freshness_seconds=0,
+                    signal_data={
+                        "event_id": source_event.id,
+                        "candidate": {"required_size": str(book.minimum_order_size)},
+                        "market": {
+                            "active": source_market.active,
+                            "closed": source_market.closed,
+                        },
+                        "model_probabilities": model_probabilities,
+                    },
                 )
                 session.add(signal)
                 await session.flush()
-                try:
-                    await open_paper_position(
-                        session,
-                        signal=signal,
-                        shares=book.minimum_order_size,
-                        minimum_order_size=book.minimum_order_size,
-                        starting_balance=settings.paper_starting_balance,
-                        fee_rate=settings.estimated_fee,
-                        slippage=settings.slippage_buffer,
-                    )
-                except PaperTradingError as exc:
-                    session.add(
-                        RejectedSignal(
-                            market_id=market.id,
-                            generated_at=now,
-                            reasons=["paper_entry_rejected"],
-                            candidate_data={"error": str(exc)},
-                        )
-                    )
 
                 model_counts = {
                     forecast.model.upper(): (
@@ -483,7 +570,11 @@ async def scan_once(
                     usable_edge=decision.usable_edge,
                     model_member_counts=model_counts,
                     station_id=normalized.station_id,
-                    observation_summary="not collected in temperature milestone",
+                    observation_summary=(
+                        f"{observations_used} hourly observations blended"
+                        if blend_applied
+                        else "no observations blended"
+                    ),
                     forecast_horizon_hours=_forecast_horizon(
                         now, normalized.local_date, normalized.timezone
                     ),
@@ -492,6 +583,12 @@ async def scan_once(
                     generated_at=now,
                 )
                 await session.commit()
+                await PaperLifecycle(sessions, settings).execute_signal(
+                    signal.id,
+                    actor="system:weather_worker",
+                    request_id=f"weather-paper:{fingerprint}",
+                    now=now,
+                )
                 if telegram and await telegram.send_signal(alert):
                     signal.alerted_at = now
                     await session.commit()

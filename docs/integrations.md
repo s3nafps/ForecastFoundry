@@ -12,7 +12,10 @@ forecastfoundry --help
 
 The default output must report `PAPER_ONLY`. Do not place wallet keys, API keys, or unlock passwords in these client configuration files. The executor keystore is intentionally unavailable to MCP.
 
-Pause and resume are the only mutating MCP calls. They require the separate `FORECASTFOUNDRY_OPERATOR_TOKEN` and write an audit record; this token is not an executor wallet secret.
+Pause and resume are the only mutating MCP calls. They require a protected
+process capability in `FORECASTFOUNDRY_MCP_OPERATOR_TOKEN` and write a durable
+audit record; this token is not an executor wallet secret and is never a tool
+argument.
 
 ## OpenClaw
 

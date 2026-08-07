@@ -2,12 +2,15 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
+from typing import cast
+from zoneinfo import ZoneInfo
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
 from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import select, text
 
 from app import PRODUCT_NAME
@@ -15,19 +18,34 @@ from app.api import router as api_router
 from app.config import Settings
 from app.dashboard import router as dashboard_router
 from app.database import make_engine, make_session_factory
+from app.domains.base import MarketInput
 from app.logging import configure_logging
-from app.models import ApplicationSetting, OrderBookSnapshot, Outcome, ProviderError
+from app.models import DomainContract, OrderBookSnapshot, Outcome, ProviderError
+from app.observability import Metrics
+from app.providers.registry import ProviderRegistry
 from app.schemas import OrderBook
+from app.services.application import ApplicationServices
+from app.services.crypto_data import CryptoMarketDataClient
+from app.services.crypto_pipeline import CryptoPaperPipeline
+from app.services.execution_control import ExecutionControl
 from app.services.forecast import OpenMeteoProvider
 from app.services.http import CircuitBreaker, ResilientHttpClient
+from app.services.observations import AviationWeatherObservations, ingest_observations
+from app.services.paper import SettlementFetcher
 from app.services.polymarket import PolymarketClient
+from app.services.provider_health import ProviderHealthMonitor
 from app.services.rules import load_market_overrides, load_station_registry
+from app.services.settlement import ProductionSettlementFetcher
 from app.services.telegram import TelegramClient
 from app.services.websocket import MarketWebSocket
 from app.worker import scan_once
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    settlement_fetcher: SettlementFetcher | None = None,
+) -> FastAPI:
     resolved = settings or Settings()
 
     @asynccontextmanager
@@ -60,6 +78,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         stations = load_station_registry(Path(resolved.station_config_path))
         overrides = load_market_overrides(Path(resolved.market_overrides_path))
+        aviation_weather = AviationWeatherObservations(
+            provider_http, resolved.aviation_weather_api_url
+        )
         telegram = None
         if resolved.telegram_bot_token and resolved.telegram_admin_user_id:
             telegram = TelegramClient(
@@ -70,23 +91,131 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         app.state.settings = resolved
         app.state.sessions = sessions
+        app.state.metrics = Metrics()
+        crypto_data = CryptoMarketDataClient(provider_http)
+        active_settlement_fetcher = settlement_fetcher or ProductionSettlementFetcher(
+            sessions, crypto_data
+        )
+        providers = (
+            ProviderHealthMonitor(sessions, ProviderRegistry.default(), provider_http)
+            if resolved.app_env != "test"
+            else None
+        )
+        app.state.services = ApplicationServices(
+            sessions,
+            resolved,
+            crypto_pipeline=CryptoPaperPipeline(
+                sessions,
+                crypto_data,
+                pricing=polymarket,
+                settings=resolved,
+            ),
+            health_monitor=providers,
+        )
 
         async def scheduled_scan() -> str:
-            async with sessions() as session:
-                paused = await session.get(ApplicationSetting, "paused")
-            if paused and paused.value is True:
-                return "paused"
-            await scan_once(
-                settings=resolved,
-                sessions=sessions,
-                polymarket=polymarket,
-                forecast_providers=forecasts,
-                stations=stations,
-                overrides=overrides,
-                telegram=telegram,
-                now=datetime.now(UTC),
+            services = cast(ApplicationServices, app.state.services)
+            return await services.run_scheduled_scan(
+                lambda: scan_once(
+                    settings=resolved,
+                    sessions=sessions,
+                    polymarket=polymarket,
+                    forecast_providers=forecasts,
+                    stations=stations,
+                    overrides=overrides,
+                    telegram=telegram,
+                    now=datetime.now(UTC),
+                )
             )
+
+        async def scheduled_crypto_scan() -> str:
+            async with sessions() as session:
+                if (await ExecutionControl(session).snapshot()).paused:
+                    return "paused"
+            events = await polymarket.discover_crypto_events()
+            markets = tuple(
+                MarketInput(
+                    market_id=market.id,
+                    title=market.question,
+                    description=market.description,
+                    raw_data={
+                        "event": event.model_dump(mode="json"),
+                        "market": market.model_dump(mode="json"),
+                    },
+                )
+                for event in events
+                for market in event.markets
+            )
+            await app.state.services.scan_markets(markets, now=datetime.now(UTC))
             return "completed"
+
+        async def scheduled_settlement() -> dict[str, object]:
+            services = cast(ApplicationServices, app.state.services)
+            return await services.run_settlement_job(
+                active_settlement_fetcher, now=datetime.now(UTC)
+            )
+
+        async def scheduled_observation_ingest() -> dict[str, object]:
+            stations_by_id = {station.station_id: station for station in stations.values()}
+            async with sessions() as session:
+                contracts = (
+                    await session.scalars(
+                        select(DomainContract).where(DomainContract.domain == "weather")
+                    )
+                ).all()
+            ingested_total = 0
+            errors = 0
+            for contract in contracts:
+                if contract.expiry is None:
+                    continue
+                now = datetime.now(UTC)
+                if contract.expiry - now > timedelta(hours=resolved.observation_blend_hours):
+                    continue
+                source = str(contract.resolution_source)
+                try:
+                    data = contract.contract_data
+                    station_id = str(data.get("station_id", ""))
+                    if station_id not in stations_by_id:
+                        continue
+                    local_date = datetime.fromisoformat(str(data.get("local_date"))).date()
+                    timezone = str(data.get("timezone"))
+                    window_end = datetime.combine(
+                        local_date + timedelta(days=1), time.min, ZoneInfo(timezone)
+                    ).astimezone(UTC)
+                    # Keep ingesting until the local reporting window is complete
+                    # (next local midnight); settlement coverage requires the final
+                    # hours of the local day, which can fall after contract expiry.
+                    if now > window_end + timedelta(hours=1):
+                        continue
+                    rows = await aviation_weather.fetch(station_id, local_date)
+                except Exception as exc:
+                    errors += 1
+                    async with sessions() as session:
+                        session.add(
+                            ProviderError(
+                                provider="aviation_weather",
+                                operation="observe",
+                                error_type=type(exc).__name__,
+                                message=str(exc),
+                                details={},
+                                retryable=True,
+                                occurred_at=datetime.now(UTC),
+                            )
+                        )
+                        await session.commit()
+                    continue
+                if not rows:
+                    continue
+                async with sessions() as session:
+                    ingested_total += await ingest_observations(
+                        session,
+                        station_id=station_id,
+                        source=source,
+                        rows=rows,
+                        retrieved_at=datetime.now(UTC),
+                    )
+                    await session.commit()
+            return {"status": "completed", "ingested": ingested_total, "errors": errors}
 
         async def store_websocket_book(book: OrderBook) -> None:
             async with sessions() as session:
@@ -148,15 +277,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await asyncio.sleep(5)
 
         app.state.run_scan = scheduled_scan
+        app.state.run_crypto_scan = scheduled_crypto_scan
+        app.state.run_settlement = scheduled_settlement
+        app.state.run_observation_ingest = scheduled_observation_ingest
 
         scheduler: AsyncIOScheduler | None = None
         websocket_task: asyncio.Task[None] | None = None
-        if resolved.app_env != "test":
+        if resolved.app_env != "test" and resolved.scheduler_enabled:
             scheduler = AsyncIOScheduler(timezone="UTC")
             scheduler.add_job(
                 scheduled_scan,
                 "interval",
                 seconds=min(resolved.polymarket_poll_seconds, resolved.weather_poll_seconds),
+                max_instances=1,
+                coalesce=True,
+            )
+            scheduler.add_job(
+                scheduled_crypto_scan,
+                "interval",
+                seconds=min(resolved.polymarket_poll_seconds, resolved.observation_poll_seconds),
+                max_instances=1,
+                coalesce=True,
+            )
+            scheduler.add_job(
+                scheduled_settlement,
+                "interval",
+                seconds=resolved.observation_poll_seconds,
+                max_instances=1,
+                coalesce=True,
+            )
+            scheduler.add_job(
+                scheduled_observation_ingest,
+                "interval",
+                seconds=resolved.observation_poll_seconds,
                 max_instances=1,
                 coalesce=True,
             )
@@ -186,6 +339,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async with request.app.state.sessions() as session:
             await session.execute(text("SELECT 1"))
         return {"status": "ready"}
+
+    @application.get("/metrics", response_class=PlainTextResponse)
+    async def metrics(request: Request) -> str:
+        return cast(Metrics, request.app.state.metrics).render()
 
     if resolved.app_env == "test":
 

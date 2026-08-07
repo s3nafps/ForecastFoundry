@@ -1,51 +1,128 @@
 name: forecastfoundry
 
+x-runtime: &runtime
+  build: .
+  user: forecastfoundry
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+  restart: unless-stopped
+  mem_limit: 512m
+  pids_limit: 128
+
 services:
+  migrate:
+    <<: *runtime
+    restart: "no"
+    read_only: false
+    environment:
+      APP_ENV: migration
+      DATABASE_URL: sqlite+aiosqlite:////data/weatheredge.db
+    volumes:
+      - weatheredge-data:/data
+    entrypoint: ["/app/docker/migrate-entrypoint.sh"]
+    command: ["true"]
+
   app:
-    build: .
-    restart: unless-stopped
-    user: forecastfoundry
+    <<: *runtime
     env_file:
       - path: .env
         required: false
     environment:
       APP_ENV: production
+      SCHEDULER_ENABLED: "false"
       DATABASE_URL: sqlite+aiosqlite:////data/weatheredge.db
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
       - weatheredge-data:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
 
+  scheduler:
+    <<: *runtime
+    environment:
+      APP_ENV: scheduler
+      SCHEDULER_ENABLED: "true"
+      DATABASE_URL: sqlite+aiosqlite:////data/weatheredge.db
+      EXECUTION_ENABLED: "false"
+    volumes:
+      - weatheredge-data:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "app.scheduler"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import app.scheduler"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   mcp:
-    build: .
-    restart: unless-stopped
-    user: forecastfoundry
+    <<: *runtime
     environment:
       APP_ENV: production
       EXECUTION_ENABLED: "false"
       HERMES_MCP_ENABLED: "true"
+      FORECASTFOUNDRY_DATABASE_URL: sqlite+aiosqlite:////var/lib/forecastfoundry/weatheredge.db
+    volumes:
+      - weatheredge-data:/var/lib/forecastfoundry
     entrypoint: ["/app/docker/mcp-entrypoint.sh"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import app.mcp_server"
+      test: ["CMD", "python", "-c", "import app.mcp_server"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+
+  executor:
+    <<: *runtime
+    environment:
+      APP_ENV: executor
+      EXECUTION_ENABLED: "false"
+      FORECASTFOUNDRY_DATABASE_URL: sqlite+aiosqlite:////data/weatheredge.db
+    volumes:
+      - weatheredge-data:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "app.executor_process"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import app.executor_process"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  postgres:
+    image: postgres:16-alpine
+    profiles: [postgres]
+    environment:
+      POSTGRES_DB: forecastfoundry
+      POSTGRES_USER: forecastfoundry
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [forecastfoundry-postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forecastfoundry -d forecastfoundry"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
 
 volumes:
   weatheredge-data:
     name: weatheredge_weatheredge-data
+  forecastfoundry-postgres:

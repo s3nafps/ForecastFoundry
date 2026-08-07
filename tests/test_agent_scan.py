@@ -44,9 +44,10 @@ async def test_agent_scan_routes_weather_and_crypto_with_shared_outputs() -> Non
         now=NOW,
     )
 
-    assert [item.route.domain for item in result.accepted] == ["weather", "crypto"]
-    assert result.accepted[1].prediction.probability == Decimal("0.65")
-    assert result.rejected == ()
+    assert [item.route.domain for item in result.accepted] == ["crypto"]
+    assert result.accepted[0].prediction.probability == Decimal("0.65")
+    assert result.rejected[0].market_id == "weather-1"
+    assert result.rejected[0].reasons[0].startswith("weather_contract_invalid:")
 
 
 @pytest.mark.asyncio

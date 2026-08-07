@@ -12,6 +12,7 @@ from app.api import (
     market_rows,
     performance_data,
     position_rows,
+    research_rows,
     signal_rows,
 )
 
@@ -76,6 +77,11 @@ async def performance_page(request: Request) -> Response:
 @router.get("/errors")
 async def error_list(request: Request) -> Response:
     return await _table(request, "Provider errors", await error_rows(request))
+
+
+@router.get("/research")
+async def research_page(request: Request) -> Response:
+    return await _table(request, "Research evidence", await research_rows(request))
 
 
 @router.get("/config")

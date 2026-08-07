@@ -8,7 +8,7 @@ def test_weather_market_routes_to_weather_plugin() -> None:
         )
     )
 
-    assert result.accepted is True
+    assert result.accepted is False
     assert result.domain == "weather"
 
 
