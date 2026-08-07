@@ -53,6 +53,7 @@ services:
       APP_ENV: scheduler
       SCHEDULER_ENABLED: "true"
       DATABASE_URL: sqlite+aiosqlite:////data/weatheredge.db
+      FORECASTFOUNDRY_DATABASE_URL: sqlite+aiosqlite:////data/weatheredge.db
       EXECUTION_ENABLED: "false"
     volumes:
       - weatheredge-data:/data
@@ -68,6 +69,7 @@ services:
 
   mcp:
     <<: *runtime
+    stdin_open: true
     environment:
       APP_ENV: production
       EXECUTION_ENABLED: "false"
