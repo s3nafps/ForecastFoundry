@@ -68,7 +68,9 @@ Completed features in this gate:
   with the `asyncpg` dev extra), and `docker` (build, compose up, `/health` and
   `/ready` polls, compose down).
 
-CI run URLs: <added after branch push>
+CI run URLs (all three jobs green, commit cbfbab7):
+- push run: https://github.com/s3nafps/ForecastFoundry/actions/runs/31136623111
+- pull_request run: https://github.com/s3nafps/ForecastFoundry/actions/runs/31136625141
 
 ## Explicitly disabled / not claimed
 
