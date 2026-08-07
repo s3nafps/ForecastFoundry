@@ -66,18 +66,21 @@ jobs:
       - name: Materialize compose secrets (untracked in repo)
         run: mkdir -p secrets && printf 'postgres' > secrets/postgres_password
       - run: docker compose config
-      - run: docker build -t forecastfoundry:test .
+      - run: docker compose build
       - run: cp .env.example .env
-      - run: docker compose up -d
+      - run: docker compose up -d --no-build
       - name: Wait for health
         run: |
-          for i in $(seq 1 30); do
+          for i in $(seq 1 90); do
             if curl --fail --silent http://127.0.0.1:8000/health > /dev/null; then
               echo "health ok"; exit 0
             fi
-            sleep 2
+            sleep 3
           done
-          echo "health check timed out"; exit 1
+          echo "health check timed out; dumping container state"
+          docker compose ps
+          docker compose logs app migrate || true
+          exit 1
       - run: curl --fail http://127.0.0.1:8000/ready
       - run: docker compose ps
       - run: docker compose down
