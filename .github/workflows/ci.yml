@@ -67,7 +67,6 @@ jobs:
         run: mkdir -p secrets && printf 'postgres' > secrets/postgres_password
       - run: docker compose config
       - run: docker compose build
-      - run: cp .env.example .env
       - run: docker compose up -d --no-build
       - name: Wait for health
         run: |
