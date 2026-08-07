@@ -46,10 +46,10 @@ DATABASE_URL=sqlite+aiosqlite:///./acceptance.db alembic downgrade base
 git diff --check
 ```
 
-Results: 244 tests passed, 1 skipped (PostgreSQL integration skipped locally),
-Ruff check and format clean, mypy clean, Alembic upgrade to revision `0009` and
+Results: 251 tests passed, 1 skipped (PostgreSQL integration skipped locally),
+Ruff check and format clean, mypy clean, Alembic upgrade to revision `0010` and
 downgrade to base verified against SQLite, and `git diff --check` clean.
-Migrations span revisions `0001` through `0009`.
+Migrations span revisions `0001` through `0010`.
 
 Completed features in this gate:
 
@@ -104,7 +104,7 @@ CI run URLs (all three jobs green, commit cbfbab7):
 ## Migration / rollback notes
 
 Revisions `0003` and `0004` add durable control, credential, and health tables;
-they do not rename or delete existing weather tables. Revisions `0005`-`0009`
+they do not rename or delete existing weather tables. Revisions `0005`-`0010`
 add execution-control idempotency, crypto evidence signals, domain contract
 identity, paper lifecycle state, and observation-blend columns
 (`observations_used`, `blend_applied`) on probability estimates. Back up the

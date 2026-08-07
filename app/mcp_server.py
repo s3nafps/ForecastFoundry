@@ -55,13 +55,7 @@ class MCPFacade:
             return self._services
         async with self._init_lock:
             if self._services is None:
-                settings = Settings(
-                    database_url=os.getenv(
-                        "FORECASTFOUNDRY_DATABASE_URL",
-                        "sqlite+aiosqlite:///./data/weatheredge.db",
-                    ),
-                    app_env="mcp",
-                )
+                settings = Settings(app_env="mcp")
                 self._engine = make_engine(settings.database_url)
                 if "pytest" in sys.modules:
                     async with self._engine.begin() as connection:

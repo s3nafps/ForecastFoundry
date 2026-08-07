@@ -784,7 +784,7 @@ async def test_cli_rest_and_mcp_share_authoritative_portfolio(
     services = ApplicationServices(sessions, settings)
     direct = await services.portfolio_status()
     mcp = await MCPFacade(services).portfolio_status()
-    monkeypatch.setenv("FORECASTFOUNDRY_DATABASE_URL", database_url)
+    monkeypatch.setenv("DATABASE_URL", database_url)
     cli = await execute_cli(argparse.Namespace(command="portfolio", json=True))
     app = create_app(settings)
     async with app.router.lifespan_context(app):

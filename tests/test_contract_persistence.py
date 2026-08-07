@@ -254,9 +254,7 @@ async def test_mcp_scan_fails_closed_through_shared_application_service(tmp_path
 def test_cli_scan_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
-    monkeypatch.setenv(
-        "FORECASTFOUNDRY_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'cli-contract.db'}"
-    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'cli-contract.db'}")
 
     assert (
         cli_main(

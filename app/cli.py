@@ -71,12 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def _services() -> tuple[ApplicationServices, Any]:
-    settings = Settings(
-        database_url=os.getenv(
-            "FORECASTFOUNDRY_DATABASE_URL", "sqlite+aiosqlite:///./data/weatheredge.db"
-        ),
-        app_env="cli",
-    )
+    settings = Settings(app_env="cli")
     engine = make_engine(settings.database_url)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)

@@ -201,3 +201,72 @@ async def test_weather_fetcher_to_settlement_wins_for_winning_bucket(tmp_path: P
     assert settled_by_position[lose_position_id].won is False
     assert settled_by_position[lose_position_id].payout == Decimal("0")
     await engine.dispose()
+
+
+async def test_weather_settlement_retries_after_inadequate_coverage(tmp_path: Path) -> None:
+    engine = make_engine(f"sqlite+aiosqlite:///{(tmp_path / 'weather-retry.db').as_posix()}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = make_session_factory(engine)
+    contract = _london_contract(market_external_id="3237364", fingerprint="retry-contract")
+    label = _bucket_label(contract, lower=24)
+    assert contract.expiry is not None
+    local_start = datetime(2026, 8, 1, 23, 30, tzinfo=UTC)
+    sparse = _daily_max_hours(local_start)[:2]
+    async with sessions() as session:
+        await ingest_observations(
+            session,
+            station_id="EGLC",
+            source=SOURCE,
+            rows=sparse,
+            retrieved_at=datetime.now(UTC),
+        )
+        session.add(contract)
+        await session.flush()
+        signal = Signal(
+            contract_id=contract.id,
+            outcome_label=label,
+            generated_at=datetime(2026, 8, 1, 10, tzinfo=UTC),
+            model_probability=Decimal("0.55"),
+            executable_ask=Decimal("0.55"),
+            raw_edge=Decimal("0.15"),
+            usable_edge=Decimal("0.10"),
+            buffers={},
+            fingerprint="retry-signal",
+            signal_data={},
+        )
+        session.add(signal)
+        await session.flush()
+        position = PaperPosition(
+            signal_id=signal.id,
+            entered_at=datetime(2026, 8, 1, 10, tzinfo=UTC),
+            entry_price=Decimal("0.55"),
+            amount=Decimal("5.00"),
+            shares=Decimal("9"),
+            fees=Decimal("0.00"),
+            status="open",
+            current_mark=Decimal("0.55"),
+            unrealized_pnl=Decimal("0.00"),
+            realized_pnl=Decimal("0.00"),
+            signal_data={},
+        )
+        session.add(position)
+        await session.commit()
+        position_id = position.id
+
+    fetcher = ProductionSettlementFetcher(sessions, _UnusedCrypto())  # type: ignore[arg-type]
+    lifecycle = PaperLifecycle(sessions, Settings(app_env="test"))
+    first = await SettlementWorker(lifecycle).run_due(fetcher)
+    second = await SettlementWorker(lifecycle).run_due(fetcher)
+
+    assert first[0]["position_id"] == position_id
+    assert first[0]["status"] == "error"
+    assert first[0]["error_type"] == "PaperTradingError"
+    assert second[0]["status"] == "error"
+
+    async with sessions() as session:
+        stored = await session.get(PaperPosition, position_id)
+        settlements = (await session.scalars(select(PaperSettlement))).all()
+    assert stored is not None and stored.status == "open"
+    assert settlements == []
+    await engine.dispose()

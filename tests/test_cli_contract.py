@@ -13,9 +13,7 @@ def test_cli_exposes_agent_neutral_commands() -> None:
 
 
 def test_cli_returns_typed_idempotency_conflict(tmp_path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setenv(
-        "FORECASTFOUNDRY_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'cli-control.db'}"
-    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'cli-control.db'}")
     monkeypatch.setenv("FORECASTFOUNDRY_OPERATOR_TOKEN", "operator-secret")
     assert (
         main(["resume", "--reason", "operator test", "--request-id", "cli-control-1", "--json"])
