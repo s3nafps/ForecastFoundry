@@ -10,7 +10,7 @@ from sqlalchemy import select
 from app.config import Settings
 from app.database import make_engine
 from app.main import create_app
-from app.models import Base, DomainContract, Observation, ProviderError
+from app.models import Base, DomainContract, Observation, ProviderError, ResearchDocument
 from app.services.observations import ObservedHour
 from app.services.research import ingest_github_issues
 
@@ -267,9 +267,24 @@ async def test_research_api_lists_documents_ordered_and_dashboard_renders(
                 await ingest_github_issues(
                     session, _github_payload(), retrieved_at=datetime(2026, 8, 2, 9, tzinfo=UTC)
                 )
+                long_body = "x" * 500
+                session.add(
+                    ResearchDocument(
+                        provider="github",
+                        external_id="9999",
+                        url="https://github.com/example/example/issues/9999",
+                        published_at=datetime(2026, 8, 3, 9, tzinfo=UTC),
+                        retrieved_at=datetime(2026, 8, 3, 9, tzinfo=UTC),
+                        content_hash="a" * 64,
+                        redacted_text=f"long title\n\n{long_body}",
+                        feature_only=True,
+                        metadata_json={"author": "bot", "title": "long title"},
+                    )
+                )
+                await session.commit()
 
             rows = (await client.get("/api/v1/research")).json()
-            assert len(rows) == 2
+            assert len(rows) == 3
             expected_keys = {
                 "provider",
                 "external_id",
@@ -285,8 +300,12 @@ async def test_research_api_lists_documents_ordered_and_dashboard_renders(
                 assert row["provider"] == "github"
                 assert row["feature_only"] is True
                 assert len(row["redacted_text"]) <= 200
-            assert rows[0]["external_id"] == "1235"
-            assert rows[1]["external_id"] == "1234"
+            truncated = next(row for row in rows if row["external_id"] == "9999")
+            assert truncated["redacted_text"].endswith("xxx")
+            assert len(truncated["redacted_text"]) == 200
+            assert rows[0]["external_id"] == "9999"
+            assert rows[1]["external_id"] == "1235"
+            assert rows[2]["external_id"] == "1234"
             assert rows[0]["published_at"] > rows[1]["published_at"]
 
             dashboard = await client.get("/research")

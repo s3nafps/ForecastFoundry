@@ -172,15 +172,20 @@ def create_app(
                 if contract.expiry - now > timedelta(hours=resolved.observation_blend_hours):
                     continue
                 source = str(contract.resolution_source)
+                data = contract.contract_data
+                station_id = str(data.get("station_id", ""))
+                raw_local_date = data.get("local_date")
+                raw_timezone = data.get("timezone")
+                if (
+                    station_id not in stations_by_id
+                    or not isinstance(raw_local_date, str)
+                    or not isinstance(raw_timezone, str)
+                ):
+                    continue
                 try:
-                    data = contract.contract_data
-                    station_id = str(data.get("station_id", ""))
-                    if station_id not in stations_by_id:
-                        continue
-                    local_date = datetime.fromisoformat(str(data.get("local_date"))).date()
-                    timezone = str(data.get("timezone"))
+                    local_date = datetime.fromisoformat(raw_local_date).date()
                     window_end = datetime.combine(
-                        local_date + timedelta(days=1), time.min, ZoneInfo(timezone)
+                        local_date + timedelta(days=1), time.min, ZoneInfo(raw_timezone)
                     ).astimezone(UTC)
                     # Keep ingesting until the local reporting window is complete
                     # (next local midnight); settlement coverage requires the final

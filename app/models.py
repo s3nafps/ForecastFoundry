@@ -564,7 +564,12 @@ class CalibrationMetric(Base):
 
 class ResearchDocument(Base):
     __tablename__ = "research_documents"
-    __table_args__ = (Index("ix_research_provider_published", "provider", "published_at"),)
+    __table_args__ = (
+        Index("ix_research_provider_published", "provider", "published_at"),
+        UniqueConstraint(
+            "provider", "external_id", "content_hash", name="uq_research_documents_identity"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     provider: Mapped[str] = mapped_column(String(40))

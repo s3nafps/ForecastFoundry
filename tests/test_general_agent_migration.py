@@ -43,13 +43,35 @@ def test_general_agent_migration_creates_auditable_tables(tmp_path: Path) -> Non
     assert NEW_TABLES <= tables
 
 
-def test_probability_estimate_observation_columns_exist() -> None:
-    # Covered by the fresh upgrade/downgrade test in this module; assert here
-    # that the columns are declared on the model.
-    from app.models import ProbabilityEstimate
+def test_probability_estimate_observation_columns_exist(tmp_path: Path) -> None:
+    database_path = tmp_path / "observation-blend.db"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path.as_posix()}")
+    command.upgrade(config, "head")
 
-    assert hasattr(ProbabilityEstimate, "observations_used")
-    assert hasattr(ProbabilityEstimate, "blend_applied")
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]: row[4]
+            for row in connection.execute(
+                "SELECT * FROM pragma_table_info('probability_estimates')"
+            ).fetchall()
+        }
+    assert "observations_used" in columns
+    assert "blend_applied" in columns
+    assert int(str(columns["observations_used"] or 0).strip("'") or 0) == 0
+    assert int(str(columns["blend_applied"] or 0).strip("'") or 0) == 0
+
+    command.downgrade(config, "0008")
+
+    with sqlite3.connect(database_path) as connection:
+        remaining = {
+            row[1]
+            for row in connection.execute(
+                "SELECT * FROM pragma_table_info('probability_estimates')"
+            ).fetchall()
+        }
+    assert "observations_used" not in remaining
+    assert "blend_applied" not in remaining
 
 
 def test_models_keep_live_orders_separate_from_paper_positions() -> None:

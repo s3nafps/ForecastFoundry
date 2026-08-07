@@ -197,9 +197,7 @@ async def test_weather_fetcher_to_settlement_wins_for_winning_bucket(tmp_path: P
     settled_by_position = {row.position_id: row for row in settlements}
     assert settled_by_position[win_position_id].won is True
     assert settled_by_position[win_position_id].payout == Decimal("9")
-    assert (
-        settled_by_position[win_position_id].resolution_data["resolved_bucket"] == win_label
-    )
+    assert settled_by_position[win_position_id].resolution_data["resolved_bucket"] == win_label
     assert settled_by_position[lose_position_id].won is False
     assert settled_by_position[lose_position_id].payout == Decimal("0")
     await engine.dispose()

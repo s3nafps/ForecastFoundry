@@ -63,10 +63,11 @@ Completed features in this gate:
   feature-only provenance, `GET /api/v1/research`, and the `/research`
   dashboard page.
 - CI: three jobs — `quality` (pytest, Ruff, mypy, SQLite migrations including
-  downgrade), `postgres` (postgres:16 service, Alembic up/down/up and
+  downgrade, `git diff --check`, repository secret material scan), `postgres`
+  (postgres:16 service, Alembic up/down/up and
   `tests/test_postgres_integration.py` via `FORECASTFOUNDRY_TEST_POSTGRES=1`,
   with the `asyncpg` dev extra), and `docker` (build, compose up, `/health` and
-  `/ready` polls, compose down).
+  `/ready` polls, all-services-healthy gate, compose down).
 
 CI run URLs (all three jobs green, commit cbfbab7):
 - push run: https://github.com/s3nafps/ForecastFoundry/actions/runs/31136623111

@@ -2,6 +2,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ResearchDocument
@@ -51,7 +52,7 @@ async def ingest_github_issues(
     items = payload.get("items")
     if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
         raise ResearchIngestError("GitHub search response must contain items")
-    inserted = 0
+    documents: list[ResearchDocument] = []
     for raw in items:
         if not isinstance(raw, Mapping):
             continue
@@ -65,10 +66,30 @@ async def ingest_github_issues(
         )
         if exists is not None:
             continue
-        session.add(document)
-        inserted += 1
-    await session.commit()
-    return inserted
+        documents.append(document)
+    if not documents:
+        return 0
+    session.add_all(documents)
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        inserted = 0
+        for document in documents:
+            exists = await session.scalar(
+                select(ResearchDocument).where(
+                    ResearchDocument.provider == "github",
+                    ResearchDocument.external_id == document.external_id,
+                    ResearchDocument.content_hash == document.content_hash,
+                )
+            )
+            if exists is not None:
+                continue
+            session.add(document)
+            await session.commit()
+            inserted += 1
+        return inserted
+    return len(documents)
 
 
 async def fetch_github_issues(

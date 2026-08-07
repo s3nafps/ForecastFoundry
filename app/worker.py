@@ -297,7 +297,18 @@ async def scan_once(
             blend_applied = False
             observations_used = 0
             observations: tuple[ObservedHour, ...] = ()
-            assert normalized.measurement == "daily_max_temperature"
+            if normalized.measurement != "daily_max_temperature":
+                for market, _, _ in markets.values():
+                    session.add(
+                        RejectedSignal(
+                            market_id=market.id,
+                            generated_at=now,
+                            reasons=["unsupported_measurement"],
+                            candidate_data={"measurement": normalized.measurement},
+                        )
+                    )
+                await session.commit()
+                continue
             within_blend = (
                 source_event.end_date is not None
                 and source_event.end_date - now <= timedelta(hours=settings.observation_blend_hours)
@@ -310,8 +321,11 @@ async def scan_once(
                     local_date=normalized.local_date,
                     timezone=normalized.timezone,
                 )
-            if within_blend and len(observations) >= settings.observation_min_count:
-                observations_used = len(observations)
+            applied_observations = (
+                tuple(obs for obs in observations if obs.observed_at <= now) if within_blend else ()
+            )
+            if within_blend and len(applied_observations) >= settings.observation_min_count:
+                observations_used = len(applied_observations)
                 blend_applied = True
                 forecasts = [
                     forecast.model_copy(
@@ -320,7 +334,9 @@ async def scan_once(
                                 member.model_copy(
                                     update={
                                         "points": apply_observations_to_points(
-                                            member.points, observations, now=now
+                                            member.points,
+                                            applied_observations,
+                                            now=now,
                                         )
                                     }
                                 )
@@ -343,6 +359,20 @@ async def scan_once(
                             exclusion_reason=None if value is not None else "missing_local_day",
                         )
                     )
+            model_member_rows: dict[str, tuple[MemberDailyValue, ...]] = {
+                forecast.model: tuple(
+                    MemberDailyValue(
+                        model=forecast.model,
+                        member_id=member.member_id,
+                        value=daily_maximum(
+                            member.points, normalized.local_date, normalized.timezone
+                        ),
+                        exclusion_reason=None,
+                    )
+                    for member in forecast.members
+                )
+                for forecast in forecasts
+            }
             probabilities = calculate_probabilities(
                 daily_members,
                 normalized.buckets,
@@ -496,18 +526,7 @@ async def scan_once(
                     continue
 
                 model_probabilities: dict[str, float] = {}
-                for forecast in forecasts:
-                    model_members = tuple(
-                        MemberDailyValue(
-                            model=forecast.model,
-                            member_id=member.member_id,
-                            value=daily_maximum(
-                                member.points, normalized.local_date, normalized.timezone
-                            ),
-                            exclusion_reason=None,
-                        )
-                        for member in forecast.members
-                    )
+                for model, model_members in model_member_rows.items():
                     per_model = calculate_probabilities(
                         model_members,
                         normalized.buckets,
@@ -515,7 +534,7 @@ async def scan_once(
                         unit=normalized.unit,
                         model_weights={},
                     )
-                    model_probabilities[forecast.model] = float(
+                    model_probabilities[model] = float(
                         per_model.outcome_probabilities.get(source_market.group_item_title, 0.0)
                     )
 
@@ -573,7 +592,11 @@ async def scan_once(
                     observation_summary=(
                         f"{observations_used} hourly observations blended"
                         if blend_applied
-                        else "no observations blended"
+                        else (
+                            "observations insufficient inside blend window"
+                            if within_blend
+                            else "no observations blended"
+                        )
                     ),
                     forecast_horizon_hours=_forecast_horizon(
                         now, normalized.local_date, normalized.timezone
