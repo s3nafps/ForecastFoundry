@@ -101,6 +101,31 @@ async def test_ingest_github_issues_persists_and_deduplicates() -> None:
     await engine.dispose()
 
 
+async def test_research_document_identity_is_unique_at_the_database() -> None:
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+
+    from app.services.research import parse_github_issue
+
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = make_session_factory(engine)
+    retrieved_at = datetime(2026, 8, 2, 0, 0, tzinfo=UTC)
+    async with sessions() as session:
+        document = parse_github_issue(_payload()["items"][0], retrieved_at=retrieved_at)
+        session.add(document)
+        await session.commit()
+        duplicate = parse_github_issue(_payload()["items"][0], retrieved_at=retrieved_at)
+        session.add(duplicate)
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
+        remaining = (await session.scalars(select(ResearchDocument))).all()
+        assert len(remaining) == 1
+    await engine.dispose()
+
+
 async def test_research_documents_do_not_affect_scan_probabilities(tmp_path: Path) -> None:
     gamma_payload = json.loads((FIXTURES / "london_event.json").read_text(encoding="utf-8"))
     event = parse_gamma_search(gamma_payload)[0]

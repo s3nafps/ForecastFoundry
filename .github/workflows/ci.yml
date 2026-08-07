@@ -81,5 +81,22 @@ jobs:
           docker compose logs app migrate || true
           exit 1
       - run: curl --fail http://127.0.0.1:8000/ready
+      - name: Wait for all services healthy
+        run: |
+          for i in $(seq 1 30); do
+            healthy=0
+            for svc in app scheduler mcp executor; do
+              status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "forecastfoundry-$svc-1" 2>/dev/null || echo missing)
+              [ "$status" = "healthy" ] && healthy=$((healthy+1))
+            done
+            if [ "$healthy" -eq 4 ]; then
+              echo "all services healthy"; exit 0
+            fi
+            sleep 5
+          done
+          echo "services not healthy:"
+          docker compose ps
+          docker compose logs scheduler mcp executor || true
+          exit 1
       - run: docker compose ps
       - run: docker compose down

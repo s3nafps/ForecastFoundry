@@ -751,7 +751,7 @@ class PaperLifecycle:
                 actor=actor,
                 request_fingerprint=request_fingerprint,
                 outcome_label=outcome,
-                settled_at=evidence.retrieved_at,
+                settled_at=datetime.now(UTC),
                 won=won,
                 payout=payout,
                 realized_pnl=realized,

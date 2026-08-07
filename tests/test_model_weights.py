@@ -125,3 +125,23 @@ async def test_load_weights_rejects_non_finite_and_out_of_range_values(stored: s
         weights = await load_model_weights(session)
 
     assert weights == {}
+
+
+async def test_load_weights_keeps_valid_entries_next_to_corrupt_ones() -> None:
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = make_session_factory(engine)
+    async with sessions() as session:
+        session.add(
+            ApplicationSetting(
+                key=WEIGHTS_KEY,
+                value={"gfs_seamless": "0.7", "ecmwf_ifs025": "not-a-number"},
+            )
+        )
+        await session.commit()
+
+    async with sessions() as session:
+        weights = await load_model_weights(session)
+
+    assert weights == {"gfs_seamless": 0.7}
