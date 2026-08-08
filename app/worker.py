@@ -1,15 +1,16 @@
 import hashlib
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.models import (
+    ApplicationSetting,
     Event,
     ForecastMember,
     ForecastRun,
@@ -24,6 +25,7 @@ from app.models import (
 )
 from app.schemas import (
     EdgeBuffers,
+    ForecastMemberSeries,
     ForecastResult,
     GammaEvent,
     GammaMarket,
@@ -50,6 +52,8 @@ class PolymarketSource(Protocol):
 
 class TelegramNotifier(Protocol):
     async def send_signal(self, alert: PaperAlert) -> bool: ...
+
+    async def send_text(self, text: str) -> bool: ...
 
 
 async def _upsert_event(session: AsyncSession, source: GammaEvent) -> Event:
@@ -151,9 +155,15 @@ async def _record_rules(
     else:
         for key, value in values.items():
             setattr(rule, key, value)
-    bucket = next(item for item in normalized.buckets if item.label == source.group_item_title)
+    bucket = next(
+        (item for item in normalized.buckets if item.label == source.group_item_title), None
+    )
+    if bucket is None:
+        raise RuleNormalizationError(
+            f"bucket title {source.group_item_title!r} is not in the parsed bucket set"
+        )
     yes = await session.scalar(
-        select(Outcome).where(Outcome.market_id == market.id, Outcome.label == "Yes")
+        select(Outcome).where(Outcome.market_id == market.id, func.lower(Outcome.label) == "yes")
     )
     if yes:
         yes.bucket_low = bucket.lower
@@ -174,6 +184,26 @@ def _fingerprint(
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def order_book_snapshot(
+    *, market_id: int, outcome_id: int, book: OrderBook, captured_at: datetime
+) -> OrderBookSnapshot:
+    return OrderBookSnapshot(
+        market_id=market_id,
+        outcome_id=outcome_id,
+        captured_at=captured_at,
+        bids=[level.model_dump(mode="json") for level in book.bids],
+        asks=[level.model_dump(mode="json") for level in book.asks],
+        best_bid=book.best_bid,
+        best_ask=book.best_ask,
+        spread=book.spread,
+        midpoint=book.midpoint,
+        available_depth=book.available_depth,
+        minimum_order_size=book.minimum_order_size or Decimal("0"),
+        tick_size=book.tick_size or Decimal("0"),
+        raw_data=book.raw_data,
+    )
+
+
 async def _provider_error(
     session: AsyncSession, provider: str, operation: str, error: Exception, now: datetime
 ) -> None:
@@ -188,6 +218,39 @@ async def _provider_error(
             occurred_at=now,
         )
     )
+
+
+async def maybe_alert_provider_errors(
+    *,
+    sessions: async_sessionmaker[AsyncSession],
+    telegram: TelegramNotifier,
+    threshold: int,
+    now: datetime,
+) -> None:
+    """Send one Telegram error alert per hour when recent failures exceed the threshold."""
+    cutoff = now - timedelta(minutes=10)
+    async with sessions() as session:
+        recent = await session.scalar(
+            select(func.count())
+            .select_from(ProviderError)
+            .where(ProviderError.retryable.is_(True), ProviderError.occurred_at >= cutoff)
+        )
+        if not recent or recent < threshold:
+            return
+        setting = await session.get(ApplicationSetting, "last_error_alert_at")
+        last_alert = (
+            datetime.fromisoformat(str(setting.value)) if setting and setting.value else None
+        )
+        if last_alert and now - last_alert < timedelta(hours=1):
+            return
+        if await telegram.send_text(
+            f"⚠️ WeatherEdge: {recent} provider errors in the last 10 minutes"
+        ):
+            if setting is None:
+                setting = ApplicationSetting(key="last_error_alert_at", value="")
+                session.add(setting)
+            setting.value = now.isoformat()
+            await session.commit()
 
 
 async def scan_once(
@@ -220,6 +283,8 @@ async def scan_once(
                 normalized = normalize_temperature_event(
                     source_event, stations, overrides.get(source_event.id)
                 )
+                for market, _, source_market in markets.values():
+                    await _record_rules(session, market, source_market, normalized)
             except RuleNormalizationError as exc:
                 for market, _, _ in markets.values():
                     session.add(
@@ -232,9 +297,6 @@ async def scan_once(
                     )
                 await session.commit()
                 continue
-
-            for market, _, source_market in markets.values():
-                await _record_rules(session, market, source_market, normalized)
 
             yes_tokens = tuple(item[1].token_id for item in markets.values())
             try:
@@ -259,10 +321,14 @@ async def scan_once(
                 except Exception as exc:
                     await _provider_error(session, "weather", "forecast", exc, now)
 
+            # Compute each member's local-calendar daily maximum once per scan.
+            dailies_by_forecast: dict[int, list[tuple[ForecastMemberSeries, float | None]]] = {}
             daily_members: list[MemberDailyValue] = []
-            for forecast in forecasts:
+            for index, forecast in enumerate(forecasts):
+                dailies: list[tuple[ForecastMemberSeries, float | None]] = []
                 for member in forecast.members:
                     value = daily_maximum(member.points, normalized.local_date, normalized.timezone)
+                    dailies.append((member, value))
                     daily_members.append(
                         MemberDailyValue(
                             model=forecast.model,
@@ -271,6 +337,7 @@ async def scan_once(
                             exclusion_reason=None if value is not None else "missing_local_day",
                         )
                     )
+                dailies_by_forecast[index] = dailies
             probabilities = calculate_probabilities(
                 daily_members,
                 normalized.buckets,
@@ -283,23 +350,11 @@ async def scan_once(
                 book = books_by_asset.get(yes.token_id)
                 if book:
                     session.add(
-                        OrderBookSnapshot(
-                            market_id=market.id,
-                            outcome_id=yes.id,
-                            captured_at=now,
-                            bids=[level.model_dump(mode="json") for level in book.bids],
-                            asks=[level.model_dump(mode="json") for level in book.asks],
-                            best_bid=book.best_bid,
-                            best_ask=book.best_ask,
-                            spread=book.spread,
-                            midpoint=book.midpoint,
-                            available_depth=book.available_depth,
-                            minimum_order_size=book.minimum_order_size,
-                            tick_size=book.tick_size,
-                            raw_data=book.raw_data,
+                        order_book_snapshot(
+                            market_id=market.id, outcome_id=yes.id, book=book, captured_at=now
                         )
                     )
-                for forecast in forecasts:
+                for index, forecast in enumerate(forecasts):
                     run = ForecastRun(
                         market_id=market.id,
                         provider=forecast.provider,
@@ -314,10 +369,7 @@ async def scan_once(
                     )
                     session.add(run)
                     await session.flush()
-                    for member in forecast.members:
-                        value = daily_maximum(
-                            member.points, normalized.local_date, normalized.timezone
-                        )
+                    for member, value in dailies_by_forecast[index]:
                         session.add(
                             ForecastMember(
                                 forecast_run_id=run.id,
@@ -361,8 +413,6 @@ async def scan_once(
                     minimum_order_size=(book.minimum_order_size if book else None),
                     paper_balance=balance,
                     valid_members=probabilities.valid_members,
-                    observations_required=False,
-                    observations_stale=False,
                     critical_quality_flags=(),
                 )
                 buffers = EdgeBuffers(
@@ -390,7 +440,9 @@ async def scan_once(
                     )
                     continue
 
+                # evaluate_signal already rejected candidates without a minimum order size.
                 assert book and book.best_ask is not None
+                assert book.minimum_order_size is not None
                 assert decision.raw_edge is not None and decision.usable_edge is not None
                 fingerprint = _fingerprint(
                     source_market.id,
@@ -399,10 +451,10 @@ async def scan_once(
                     book.best_ask,
                     decision.usable_edge,
                 )
-                duplicate = await session.scalar(
+                existing = await session.scalar(
                     select(Signal).where(Signal.fingerprint == fingerprint)
                 )
-                if duplicate:
+                if existing and existing.alerted_at is not None:
                     session.add(
                         RejectedSignal(
                             market_id=market.id,
@@ -413,55 +465,56 @@ async def scan_once(
                     )
                     continue
 
-                signal = Signal(
-                    market_id=market.id,
-                    outcome_id=yes.id,
-                    generated_at=now,
-                    model_probability=probability,
-                    executable_ask=book.best_ask,
-                    raw_edge=decision.raw_edge,
-                    usable_edge=decision.usable_edge,
-                    buffers={
-                        "estimated_fee": str(buffers.estimated_fee),
-                        "slippage": str(buffers.slippage),
-                        "uncertainty": str(buffers.uncertainty),
-                        "rule_risk": str(buffers.rule_risk),
-                    },
-                    fingerprint=fingerprint,
-                    signal_data={"event_id": source_event.id},
-                )
-                session.add(signal)
-                await session.flush()
-                try:
-                    await open_paper_position(
-                        session,
-                        signal=signal,
-                        shares=book.minimum_order_size,
-                        minimum_order_size=book.minimum_order_size,
-                        starting_balance=settings.paper_starting_balance,
-                        fee_rate=settings.estimated_fee,
-                        slippage=settings.slippage_buffer,
+                if existing is None:
+                    signal = Signal(
+                        market_id=market.id,
+                        outcome_id=yes.id,
+                        generated_at=now,
+                        model_probability=probability,
+                        executable_ask=book.best_ask,
+                        raw_edge=decision.raw_edge,
+                        usable_edge=decision.usable_edge,
+                        buffers={
+                            "estimated_fee": str(buffers.estimated_fee),
+                            "slippage": str(buffers.slippage),
+                            "uncertainty": str(buffers.uncertainty),
+                            "rule_risk": str(buffers.rule_risk),
+                        },
+                        fingerprint=fingerprint,
+                        signal_data={"event_id": source_event.id},
                     )
-                except PaperTradingError as exc:
-                    session.add(
-                        RejectedSignal(
-                            market_id=market.id,
-                            generated_at=now,
-                            reasons=["paper_entry_rejected"],
-                            candidate_data={"error": str(exc)},
+                    session.add(signal)
+                    await session.flush()
+                    try:
+                        await open_paper_position(
+                            session,
+                            signal=signal,
+                            shares=book.minimum_order_size,
+                            minimum_order_size=book.minimum_order_size,
+                            starting_balance=settings.paper_starting_balance,
+                            fee_rate=settings.estimated_fee,
+                            slippage=settings.slippage_buffer,
                         )
-                    )
+                    except PaperTradingError as exc:
+                        session.add(
+                            RejectedSignal(
+                                market_id=market.id,
+                                generated_at=now,
+                                reasons=["paper_entry_rejected"],
+                                candidate_data={"error": str(exc)},
+                            )
+                        )
+                else:
+                    # A prior delivery failed (alert_error set); retry the alert
+                    # without duplicating the signal or paper position.
+                    signal = existing
 
                 model_counts = {
                     forecast.model.upper(): (
-                        sum(
-                            daily_maximum(member.points, normalized.local_date, normalized.timezone)
-                            is not None
-                            for member in forecast.members
-                        ),
+                        sum(value is not None for _, value in dailies_by_forecast[index]),
                         len(forecast.members),
                     )
-                    for forecast in forecasts
+                    for index, forecast in enumerate(forecasts)
                 }
                 alert = PaperAlert(
                     question=source_event.title,
@@ -481,7 +534,12 @@ async def scan_once(
                     generated_at=now,
                 )
                 await session.commit()
-                if telegram and await telegram.send_signal(alert):
-                    signal.alerted_at = now
+                if telegram:
+                    try:
+                        if await telegram.send_signal(alert):
+                            signal.alerted_at = now
+                            signal.alert_error = None
+                    except Exception as exc:
+                        signal.alert_error = f"{type(exc).__name__}: {exc}"
                     await session.commit()
             await session.commit()

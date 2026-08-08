@@ -60,7 +60,6 @@ class Event(TimestampMixin, Base):
     resolution_source: Mapped[str | None] = mapped_column(Text)
     active: Mapped[bool] = mapped_column(Boolean, index=True)
     closed: Mapped[bool] = mapped_column(Boolean, index=True)
-    start_time: Mapped[datetime | None] = mapped_column(UTCDateTime())
     end_time: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
     raw_data: Mapped[dict[str, object]] = mapped_column(JSON)
 
@@ -170,22 +169,6 @@ class ForecastMember(Base):
     bias_correction: Mapped[float] = mapped_column(Float, default=0.0)
     valid: Mapped[bool] = mapped_column(Boolean)
     exclusion_reason: Mapped[str | None] = mapped_column(String(160))
-
-
-class Observation(Base):
-    __tablename__ = "observations"
-    __table_args__ = (Index("ix_observations_station_time", "station_id", "observed_at"),)
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id", ondelete="SET NULL"))
-    station_id: Mapped[str] = mapped_column(String(32))
-    observed_at: Mapped[datetime] = mapped_column(UTCDateTime())
-    air_temperature: Mapped[float | None] = mapped_column(Float)
-    precipitation: Mapped[float | None] = mapped_column(Float)
-    source: Mapped[str] = mapped_column(String(80))
-    retrieved_at: Mapped[datetime] = mapped_column(UTCDateTime())
-    quality_flags: Mapped[list[str]] = mapped_column(JSON)
-    raw_data: Mapped[dict[str, object]] = mapped_column(JSON)
 
 
 class ProbabilityEstimate(Base):

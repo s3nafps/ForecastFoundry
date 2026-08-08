@@ -1,6 +1,6 @@
 # WeatherEdge
 
-WeatherEdge is a paper-only intelligence service for active Polymarket daily maximum-temperature bucket markets. It discovers public markets, reads executable CLOB asks, turns Open-Meteo ensemble members into deterministic bucket probabilities, filters usable edge, records a $5 paper ledger, and can send Telegram alerts.
+WeatherEdge is a paper-only intelligence service for active Polymarket daily maximum-temperature bucket markets. It discovers public markets, reads executable CLOB asks, turns Open-Meteo ensemble members into deterministic bucket probabilities, filters usable edge, records a $5 paper ledger, settles positions automatically when markets resolve, and can send Telegram alerts (signals and provider-outage alerts).
 
 > **No real trading.** WeatherEdge v1 contains no wallet, private key, signing, order-placement, deposit, or withdrawal code. `REAL_TRADING_ENABLED=true` is rejected at startup. Forecast probability is an estimate, not truth or financial advice.
 
@@ -41,7 +41,7 @@ python -m mypy app
 
 ## Configuration
 
-Settings are read from environment variables or `.env`; see `.env.example`. The important controls are polling intervals, rule confidence, minimum ensemble members, edge/spread/liquidity filters, buffers, paper balance, forecast models, and the optional WebSocket flag. Keep `REAL_TRADING_ENABLED=false`.
+Settings are read from environment variables or `.env`; see `.env.example`. The important controls are polling intervals, automatic settlement (`SETTLEMENT_ENABLED`), the provider-error alert threshold (`PROVIDER_ERROR_ALERT_THRESHOLD`), rule confidence, minimum ensemble members, edge/spread/liquidity filters, buffers, paper balance, forecast models, and the optional WebSocket flag. Keep `REAL_TRADING_ENABLED=false`.
 
 To enable Telegram alerts:
 

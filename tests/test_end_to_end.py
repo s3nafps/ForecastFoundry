@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.database import make_engine, make_session_factory
@@ -24,6 +25,7 @@ from app.models import (
 )
 from app.schemas import ForecastResult, GammaEvent, OrderBook, OrderLevel, PaperAlert, Station
 from app.services.forecast import parse_open_meteo_response
+from app.services.http import ProviderResponseError
 from app.services.polymarket import parse_gamma_search
 from app.services.rules import load_station_registry
 from app.worker import scan_once
@@ -67,6 +69,18 @@ class RecordingTelegram:
         return True
 
 
+class FlakyTelegram(RecordingTelegram):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next = 1
+
+    async def send_signal(self, alert: PaperAlert) -> bool:
+        if self.fail_next > 0:
+            self.fail_next -= 1
+            raise ProviderResponseError("telegram unavailable")
+        return await super().send_signal(alert)
+
+
 def book(condition: str, asset: str, ask: str) -> OrderBook:
     ask_decimal = Decimal(ask)
     bid = ask_decimal - Decimal("0.02")
@@ -87,10 +101,18 @@ def book(condition: str, asset: str, ask: str) -> OrderBook:
     )
 
 
-@pytest.mark.asyncio
-async def test_recorded_london_market_runs_end_to_end_without_duplicate_alerts(
-    tmp_path: Path,
-) -> None:
+ScanSetup = tuple[
+    AsyncEngine,
+    async_sessionmaker[AsyncSession],
+    Settings,
+    GammaEvent,
+    tuple[OrderBook, ...],
+    ForecastResult,
+    dict[str, Station],
+]
+
+
+async def scan_setup(tmp_path: Path) -> ScanSetup:
     gamma_payload = json.loads((FIXTURES / "london_event.json").read_text(encoding="utf-8"))
     event = parse_gamma_search(gamma_payload)[0]
     ensemble_payload = json.loads((FIXTURES / "london_ensemble.json").read_text(encoding="utf-8"))
@@ -117,21 +139,13 @@ async def test_recorded_london_market_runs_end_to_end_without_duplicate_alerts(
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     sessions = make_session_factory(engine)
-    telegram = RecordingTelegram()
     stations: dict[str, Station] = load_station_registry(Path("config/stations.yaml"))
+    return engine, sessions, settings, event, books, forecast, stations
 
-    for _ in range(2):
-        await scan_once(
-            settings=settings,
-            sessions=sessions,
-            polymarket=StaticPolymarket(event, books),
-            forecast_providers=(StaticForecast(forecast),),
-            stations=stations,
-            overrides={},
-            telegram=telegram,
-            now=retrieved_at,
-        )
 
+async def table_counts(
+    sessions: async_sessionmaker[AsyncSession],
+) -> dict[str, int]:
     async with sessions() as session:
         counts = {}
         for model in (
@@ -149,16 +163,73 @@ async def test_recorded_london_market_runs_end_to_end_without_duplicate_alerts(
             counts[model.__tablename__] = await session.scalar(
                 select(func.count()).select_from(model)
             )
+    return counts
 
-    assert counts["events"] == 1
-    assert counts["markets"] == 3
-    assert counts["order_book_snapshots"] == 6
-    assert counts["normalized_rules"] == 3
-    assert counts["forecast_runs"] == 6
-    assert counts["forecast_members"] == 18
-    assert counts["probability_estimates"] == 6
-    assert counts["signals"] == 1
-    assert counts["paper_positions"] == 1
-    assert counts["rejected_signals"] == 5
-    assert len(telegram.alerts) == 1
-    await engine.dispose()
+
+@pytest.mark.asyncio
+async def test_recorded_london_market_runs_end_to_end_without_duplicate_alerts(
+    tmp_path: Path,
+) -> None:
+    engine, sessions, settings, event, books, forecast, stations = await scan_setup(tmp_path)
+    telegram = RecordingTelegram()
+    retrieved_at = datetime(2026, 8, 2, 9, tzinfo=UTC)
+
+    try:
+        for _ in range(2):
+            await scan_once(
+                settings=settings,
+                sessions=sessions,
+                polymarket=StaticPolymarket(event, books),
+                forecast_providers=(StaticForecast(forecast),),
+                stations=stations,
+                overrides={},
+                telegram=telegram,
+                now=retrieved_at,
+            )
+
+        counts = await table_counts(sessions)
+        assert counts["events"] == 1
+        assert counts["markets"] == 3
+        assert counts["order_book_snapshots"] == 6
+        assert counts["normalized_rules"] == 3
+        assert counts["forecast_runs"] == 6
+        assert counts["forecast_members"] == 18
+        assert counts["probability_estimates"] == 6
+        assert counts["signals"] == 1
+        assert counts["paper_positions"] == 1
+        assert counts["rejected_signals"] == 5
+        assert len(telegram.alerts) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_failed_telegram_delivery_is_retried_on_the_next_scan(tmp_path: Path) -> None:
+    engine, sessions, settings, event, books, forecast, stations = await scan_setup(tmp_path)
+    telegram = FlakyTelegram()
+    retrieved_at = datetime(2026, 8, 2, 9, tzinfo=UTC)
+
+    try:
+        for _ in range(3):
+            await scan_once(
+                settings=settings,
+                sessions=sessions,
+                polymarket=StaticPolymarket(event, books),
+                forecast_providers=(StaticForecast(forecast),),
+                stations=stations,
+                overrides={},
+                telegram=telegram,
+                now=retrieved_at,
+            )
+
+        counts = await table_counts(sessions)
+        async with sessions() as session:
+            signal = await session.scalar(select(Signal))
+
+        assert counts["signals"] == 1
+        assert counts["paper_positions"] == 1
+        assert len(telegram.alerts) == 1
+        assert signal is not None and signal.alerted_at is not None
+        assert signal.alert_error is None
+    finally:
+        await engine.dispose()

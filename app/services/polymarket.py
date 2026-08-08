@@ -66,7 +66,7 @@ def parse_gamma_search(payload: object) -> tuple[GammaEvent, ...]:
     return tuple(events)
 
 
-def parse_order_book(payload: object) -> OrderBook:
+def parse_order_book(payload: object, *, required: bool = True) -> OrderBook:
     if not isinstance(payload, Mapping):
         raise ProviderResponseError("CLOB order book must be an object")
     try:
@@ -85,6 +85,8 @@ def parse_order_book(payload: object) -> OrderBook:
         )
         best_bid = bids[0].price if bids else None
         best_ask = asks[0].price if asks else None
+        minimum_size = payload["min_order_size"] if required else payload.get("min_order_size")
+        tick_size = payload["tick_size"] if required else payload.get("tick_size")
         spread = best_ask - best_bid if best_ask is not None and best_bid is not None else None
         midpoint = (
             (best_ask + best_bid) / 2 if best_ask is not None and best_bid is not None else None
@@ -100,8 +102,9 @@ def parse_order_book(payload: object) -> OrderBook:
             spread=spread,
             midpoint=midpoint,
             available_depth=sum((level.size for level in asks), Decimal("0")),
-            minimum_order_size=Decimal(str(payload["min_order_size"])),
-            tick_size=Decimal(str(payload["tick_size"])),
+            # WebSocket book events omit market params; require them only from REST.
+            minimum_order_size=(Decimal(str(minimum_size)) if minimum_size is not None else None),
+            tick_size=Decimal(str(tick_size)) if tick_size is not None else None,
             raw_data=dict(payload),
         )
     except (KeyError, TypeError, ValidationError, ValueError) as exc:
@@ -136,3 +139,22 @@ class PolymarketClient:
         if not isinstance(payload, list):
             raise ProviderResponseError("CLOB books response must be a list")
         return tuple(parse_order_book(book) for book in payload)
+
+    async def get_resolution(self, condition_id: str) -> tuple[bool, str | None]:
+        """Return (closed, winning token id). Void markets return (closed, None)."""
+        payload = await self._http.request_json("GET", f"{self._clob_url}/markets/{condition_id}")
+        if not isinstance(payload, Mapping):
+            raise ProviderResponseError("CLOB market response must be an object")
+        try:
+            closed = payload["closed"]
+            tokens = payload["tokens"]
+            if not isinstance(closed, bool) or not isinstance(tokens, list):
+                raise ProviderResponseError("CLOB market response is missing closed or tokens")
+            winners = [
+                str(token["token_id"])
+                for token in tokens
+                if isinstance(token, Mapping) and token.get("winner") is True
+            ]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProviderResponseError("CLOB market response is invalid") from exc
+        return closed, winners[0] if len(winners) == 1 else None

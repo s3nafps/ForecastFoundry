@@ -46,7 +46,7 @@ class MarketWebSocket:
                     events = payload if isinstance(payload, list) else [payload]
                     for event in events:
                         if isinstance(event, dict) and event.get("event_type") == "book":
-                            await on_book(parse_order_book(event))
+                            await on_book(parse_order_book(event, required=False))
             finally:
                 heartbeat_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

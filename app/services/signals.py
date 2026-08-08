@@ -1,8 +1,6 @@
-from datetime import datetime, timedelta
 from decimal import Decimal
 
 from app.schemas import (
-    AlertState,
     EdgeBuffers,
     EdgeResult,
     SignalCandidate,
@@ -57,8 +55,6 @@ def evaluate_signal(
             reasons.append("minimum_order_exceeds_balance")
     if candidate.valid_members < policy.min_ensemble_members:
         reasons.append("insufficient_ensemble_members")
-    if candidate.observations_required and candidate.observations_stale:
-        reasons.append("observations_stale")
     if candidate.critical_quality_flags:
         reasons.append("critical_data_quality_flags")
 
@@ -71,24 +67,3 @@ def evaluate_signal(
         raw_edge=edge.raw_edge,
         usable_edge=edge.usable_edge,
     )
-
-
-def should_send_alert(
-    previous: AlertState | None,
-    current: AlertState,
-    *,
-    now: datetime,
-    price_change: Decimal = Decimal("0.02"),
-    probability_change: Decimal = Decimal("0.05"),
-    edge_threshold: Decimal = Decimal("0.10"),
-    cooldown: timedelta = timedelta(hours=1),
-) -> bool:
-    if previous is None or current.outcome_label != previous.outcome_label:
-        return True
-    if abs(current.executable_ask - previous.executable_ask) >= price_change:
-        return True
-    if abs(current.model_probability - previous.model_probability) >= probability_change:
-        return True
-    if (previous.usable_edge < edge_threshold) != (current.usable_edge < edge_threshold):
-        return True
-    return now - previous.sent_at >= cooldown

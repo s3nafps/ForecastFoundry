@@ -41,15 +41,18 @@ class TelegramClient:
         self._chat_id = chat_id
 
     async def send_signal(self, alert: PaperAlert) -> bool:
+        return await self.send_text(format_signal_alert(alert))
+
+    async def send_text(self, text: str) -> bool:
         payload = await self._http.request_json(
             "POST",
             self._url,
             json={
                 "chat_id": self._chat_id,
-                "text": format_signal_alert(alert),
+                "text": text,
                 "disable_web_page_preview": True,
             },
         )
         if not isinstance(payload, Mapping) or payload.get("ok") is not True:
-            raise ProviderResponseError("Telegram rejected the alert")
+            raise ProviderResponseError("Telegram rejected the message")
         return True

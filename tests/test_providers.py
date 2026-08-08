@@ -8,7 +8,12 @@ import httpx
 import pytest
 
 from app.services.forecast import parse_open_meteo_response
-from app.services.http import CircuitBreaker, ProviderUnavailable, ResilientHttpClient
+from app.services.http import (
+    CircuitBreaker,
+    ProviderResponseError,
+    ProviderUnavailable,
+    ResilientHttpClient,
+)
 from app.services.polymarket import parse_gamma_search, parse_order_book
 from app.services.websocket import market_subscription
 
@@ -53,6 +58,23 @@ def test_order_book_without_asks_has_no_executable_price() -> None:
     assert book.best_ask is None
     assert book.spread is None
     assert book.midpoint is None
+
+
+def test_websocket_book_events_without_market_params_parse_leniently() -> None:
+    raw = fixture("london_books.json")
+    assert isinstance(raw, list) and isinstance(raw[0], dict)
+    ws_event = {
+        key: value for key, value in raw[0].items() if key not in {"min_order_size", "tick_size"}
+    }
+
+    book = parse_order_book(ws_event, required=False)
+
+    assert book.best_ask == Decimal("0.47")
+    assert book.minimum_order_size is None
+    assert book.tick_size is None
+
+    with pytest.raises(ProviderResponseError):
+        parse_order_book(ws_event)
 
 
 def test_open_meteo_parser_preserves_each_available_member() -> None:

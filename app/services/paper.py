@@ -102,7 +102,11 @@ async def open_paper_position(
 
 
 async def settle_paper_position(
-    session: AsyncSession, position_id: int, *, won: bool
+    session: AsyncSession,
+    position_id: int,
+    *,
+    won: bool,
+    starting_balance: Decimal = Decimal("5"),
 ) -> PaperSettlement:
     position = await session.get(PaperPosition, position_id)
     if position is None or position.status != "open":
@@ -110,7 +114,7 @@ async def settle_paper_position(
     signal = await session.get(Signal, position.signal_id)
     if signal is None:
         raise PaperTradingError("paper position signal is missing")
-    balance = await get_paper_balance(session, Decimal("5"))
+    balance = await get_paper_balance(session, starting_balance)
     payout = position.shares if won else Decimal("0")
     realized_pnl = payout - position.amount
     observed = Decimal("1") if won else Decimal("0")
@@ -121,10 +125,10 @@ async def settle_paper_position(
         payout=payout,
         realized_pnl=realized_pnl,
         brier_score=float((signal.model_probability - observed) ** 2),
-        resolution_data={"manual": True},
+        resolution_data={"automatic": True},
     )
     position.status = "settled"
     session.add(settlement)
-    await _set_paper_balance(session, balance + payout, Decimal("5"))
+    await _set_paper_balance(session, balance + payout, starting_balance)
     await session.flush()
     return settlement

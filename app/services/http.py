@@ -84,6 +84,7 @@ class ResilientHttpClient:
     async def request_json(self, method: str, url: str, **kwargs: Any) -> object:
         await self._circuit.before_request()
         last_error: Exception | None = None
+        response: httpx.Response | None = None
         for attempt in range(self._max_retries + 1):
             await self._pace()
             try:
@@ -95,7 +96,7 @@ class ResilientHttpClient:
             except (httpx.TimeoutException, httpx.NetworkError, ProviderUnavailable) as exc:
                 last_error = exc
                 if attempt < self._max_retries:
-                    await self._sleep(self._retry_delay(attempt, locals().get("response")))
+                    await self._sleep(self._retry_delay(attempt, response))
                     continue
                 await self._circuit.record_failure()
                 raise ProviderUnavailable("provider request failed after retries") from exc
@@ -109,7 +110,7 @@ class ResilientHttpClient:
         raise ProviderUnavailable("provider request failed") from last_error
 
     @staticmethod
-    def _retry_delay(attempt: int, response: object) -> float:
+    def _retry_delay(attempt: int, response: httpx.Response | None) -> float:
         if isinstance(response, httpx.Response) and (
             retry_after := response.headers.get("Retry-After")
         ):

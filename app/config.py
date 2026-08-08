@@ -14,7 +14,8 @@ class Settings(BaseSettings):
 
     polymarket_poll_seconds: int = Field(default=120, gt=0)
     weather_poll_seconds: int = Field(default=900, gt=0)
-    observation_poll_seconds: int = Field(default=300, gt=0)
+    settlement_enabled: bool = True
+    provider_error_alert_threshold: int = Field(default=3, gt=0)
     min_rule_confidence: int = Field(default=90, ge=0, le=100)
     min_ensemble_members: int = Field(default=25, gt=0)
     min_usable_edge: Decimal = Field(default=Decimal("0.10"), ge=0, le=1)
@@ -38,9 +39,6 @@ class Settings(BaseSettings):
     http_max_retries: int = Field(default=3, ge=0, le=10)
     provider_circuit_failures: int = Field(default=5, gt=0)
     provider_circuit_reset_seconds: int = Field(default=300, gt=0)
-    signal_cooldown_seconds: int = Field(default=3600, ge=0)
-    material_price_change: Decimal = Field(default=Decimal("0.02"), ge=0, le=1)
-    material_probability_change: Decimal = Field(default=Decimal("0.05"), ge=0, le=1)
     log_level: str = "INFO"
 
     @model_validator(mode="after")

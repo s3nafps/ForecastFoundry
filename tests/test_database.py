@@ -18,7 +18,6 @@ REQUIRED_TABLES = {
     "normalized_rules",
     "forecast_runs",
     "forecast_members",
-    "observations",
     "probability_estimates",
     "signals",
     "rejected_signals",

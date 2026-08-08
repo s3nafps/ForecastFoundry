@@ -53,7 +53,6 @@ def calculate_probabilities(
     unit: TemperatureUnit,
     model_weights: Mapping[str, float],
 ) -> ProbabilityResult:
-    del unit
     valid_by_model: dict[str, list[MemberDailyValue]] = defaultdict(list)
     excluded = 0
     for member in members:
@@ -85,7 +84,11 @@ def calculate_probabilities(
         member_weight = weights[model] / len(model_members)
         for member in model_members:
             assert member.value is not None
+            # Open-Meteo ensemble members are always Celsius; markets may quote
+            # Fahrenheit buckets, so convert before rounding and bucket mapping.
             corrected = member.value + member.bias_correction
+            if unit == TemperatureUnit.FAHRENHEIT:
+                corrected = celsius_to_fahrenheit(corrected)
             rounded = round_temperature(corrected, rounding_method)
             bucket = next((candidate for candidate in buckets if candidate.contains(rounded)), None)
             if bucket is None:

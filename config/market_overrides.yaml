@@ -1,1 +1,10 @@
-{}
+# Explicit audit overrides for market rule normalization.
+# Keyed by Gamma event id; only these fields may be overridden.
+# Unknown fields or events without an audited station are rejected at startup
+# or during normalization. Keep this file under version control.
+
+# example:
+# 3237363:
+#   resolution_source: "https://aviationweather.gov/api/data/stationinfo?ids=EGLC&format=json"
+#   rounding_method: floor
+#   station_id: EGLC

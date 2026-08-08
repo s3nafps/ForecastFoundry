@@ -93,3 +93,26 @@ def test_bias_is_applied_before_rounding_and_mapping() -> None:
     )
 
     assert result.outcome_probabilities["24°C or higher"] == 1
+
+
+def test_fahrenheit_buckets_convert_celsius_members_before_rounding() -> None:
+    buckets = (
+        Bucket(label="79°F or below", upper=79),
+        Bucket(label="80°F or higher", lower=80),
+    )
+    members = (
+        MemberDailyValue(model="gfs", member_id="1", value=26.0),  # 78.8°F rounds to 79
+        MemberDailyValue(model="gfs", member_id="2", value=27.0),  # 80.6°F rounds to 81
+    )
+
+    result = calculate_probabilities(
+        members,
+        buckets,
+        rounding_method=RoundingMethod.HALF_UP,
+        unit=TemperatureUnit.FAHRENHEIT,
+        model_weights={},
+    )
+
+    assert result.outcome_probabilities == pytest.approx(
+        {"79°F or below": 0.5, "80°F or higher": 0.5}
+    )

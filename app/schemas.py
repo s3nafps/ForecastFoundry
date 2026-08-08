@@ -137,8 +137,9 @@ class OrderBook(FrozenModel):
     spread: Decimal | None
     midpoint: Decimal | None
     available_depth: Decimal
-    minimum_order_size: Decimal
-    tick_size: Decimal
+    # None when the source (WebSocket book events) does not carry market params.
+    minimum_order_size: Decimal | None = None
+    tick_size: Decimal | None = None
     raw_data: dict[str, object]
 
 
@@ -189,8 +190,6 @@ class SignalCandidate(FrozenModel):
     minimum_order_size: Decimal | None
     paper_balance: Decimal
     valid_members: int
-    observations_required: bool
-    observations_stale: bool
     critical_quality_flags: tuple[str, ...]
 
 
@@ -204,14 +203,6 @@ class SignalDecision(FrozenModel):
     rejection_reasons: tuple[str, ...]
     raw_edge: Decimal | None
     usable_edge: Decimal | None
-
-
-class AlertState(FrozenModel):
-    outcome_label: str
-    executable_ask: Decimal
-    model_probability: Decimal
-    usable_edge: Decimal
-    sent_at: datetime
 
 
 class EntryQuote(FrozenModel):

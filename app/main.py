@@ -15,15 +15,16 @@ from app.config import Settings
 from app.dashboard import router as dashboard_router
 from app.database import make_engine, make_session_factory
 from app.logging import configure_logging
-from app.models import ApplicationSetting, OrderBookSnapshot, Outcome, ProviderError
+from app.models import ApplicationSetting, Outcome, ProviderError
 from app.schemas import OrderBook
 from app.services.forecast import OpenMeteoProvider
 from app.services.http import CircuitBreaker, ResilientHttpClient
 from app.services.polymarket import PolymarketClient
 from app.services.rules import load_market_overrides, load_station_registry
+from app.services.settlement import settle_resolved_markets
 from app.services.telegram import TelegramClient
 from app.services.websocket import MarketWebSocket
-from app.worker import scan_once
+from app.worker import maybe_alert_provider_errors, order_book_snapshot, scan_once
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -85,6 +86,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 telegram=telegram,
                 now=datetime.now(UTC),
             )
+            if resolved.settlement_enabled:
+                await settle_resolved_markets(
+                    sessions=sessions,
+                    polymarket=polymarket,
+                    starting_balance=resolved.paper_starting_balance,
+                    now=datetime.now(UTC),
+                )
+            if telegram:
+                await maybe_alert_provider_errors(
+                    sessions=sessions,
+                    telegram=telegram,
+                    threshold=resolved.provider_error_alert_threshold,
+                    now=datetime.now(UTC),
+                )
             return "completed"
 
         async def store_websocket_book(book: OrderBook) -> None:
@@ -95,20 +110,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if outcome is None:
                     return
                 session.add(
-                    OrderBookSnapshot(
+                    order_book_snapshot(
                         market_id=outcome.market_id,
                         outcome_id=outcome.id,
+                        book=book,
                         captured_at=datetime.now(UTC),
-                        bids=[level.model_dump(mode="json") for level in book.bids],
-                        asks=[level.model_dump(mode="json") for level in book.asks],
-                        best_bid=book.best_bid,
-                        best_ask=book.best_ask,
-                        spread=book.spread,
-                        midpoint=book.midpoint,
-                        available_depth=book.available_depth,
-                        minimum_order_size=book.minimum_order_size,
-                        tick_size=book.tick_size,
-                        raw_data=book.raw_data,
                     )
                 )
                 await session.commit()
