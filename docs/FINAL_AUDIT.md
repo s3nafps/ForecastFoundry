@@ -71,7 +71,7 @@ Completed features in this gate:
 
 CI run URLs (quality, PostgreSQL, and Docker jobs green):
 - main run: https://github.com/s3nafps/ForecastFoundry/actions/runs/31203577652
-- review-fixes run: https://github.com/s3nafps/ForecastFoundry/actions/runs/31205008760
+- review-fixes run: https://github.com/s3nafps/ForecastFoundry/actions/runs/31270709060
 
 ## Explicitly disabled / not claimed
 

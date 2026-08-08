@@ -2,6 +2,11 @@
 
 > **For AI workers:** Required sub-skill: use executing-plans to implement this plan in the current session. Track steps with the checkboxes below.
 
+> **Status:** Completed on 2026-08-02. This file preserves the original TDD execution
+> template; its unchecked boxes are historical and are not the current project tracker.
+> See [`docs/FINAL_AUDIT.md`](../../FINAL_AUDIT.md) for current delivery and verification
+> status.
+
 **Goal:** Build a production-capable, paper-only service that turns active Polymarket daily maximum-temperature bucket events into persisted forecast probabilities, signal decisions, $5 paper positions, and optional Telegram alerts.
 
 **Architecture:** A single FastAPI process hosts read-only pages/API and APScheduler polling jobs. Async adapters isolate Gamma, CLOB, Open-Meteo, and Telegram formats; a deterministic domain core normalizes rules, calculates member probabilities, evaluates executable-price edges, and applies paper-ledger constraints. SQLite stores every source snapshot and decision through SQLAlchemy/Alembic.
