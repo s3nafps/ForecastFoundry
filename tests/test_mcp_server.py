@@ -43,9 +43,7 @@ def test_pause_resume_require_operator_authentication(monkeypatch: pytest.Monkey
 def test_mcp_raises_typed_idempotency_conflict(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FORECASTFOUNDRY_OPERATOR_TOKEN", "operator-secret")
     monkeypatch.setenv("FORECASTFOUNDRY_MCP_OPERATOR_TOKEN", "operator-secret")
-    monkeypatch.setenv(
-        "FORECASTFOUNDRY_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'mcp-control.db'}"
-    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'mcp-control.db'}")
     server = create_server()
     asyncio.run(
         invoke_tool(
@@ -70,9 +68,7 @@ async def test_registered_mcp_tool_returns_machine_readable_idempotency_conflict
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("FORECASTFOUNDRY_MCP_OPERATOR_TOKEN", "operator-secret")
-    monkeypatch.setenv(
-        "FORECASTFOUNDRY_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'mcp-transport.db'}"
-    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'mcp-transport.db'}")
     server = create_server()
     await server.call_tool(
         "resume_execution", {"reason": "operator test", "request_id": "mcp-transport-1"}

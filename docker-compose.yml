@@ -53,7 +53,7 @@ services:
       APP_ENV: scheduler
       SCHEDULER_ENABLED: "true"
       DATABASE_URL: sqlite+aiosqlite:////data/weatheredge.db
-      FORECASTFOUNDRY_DATABASE_URL: sqlite+aiosqlite:////data/weatheredge.db
+
       EXECUTION_ENABLED: "false"
     volumes:
       - weatheredge-data:/data
@@ -74,7 +74,7 @@ services:
       APP_ENV: production
       EXECUTION_ENABLED: "false"
       HERMES_MCP_ENABLED: "true"
-      FORECASTFOUNDRY_DATABASE_URL: sqlite+aiosqlite:////var/lib/forecastfoundry/weatheredge.db
+      DATABASE_URL: sqlite+aiosqlite:////var/lib/forecastfoundry/weatheredge.db
     volumes:
       - weatheredge-data:/var/lib/forecastfoundry
     entrypoint: ["/app/docker/mcp-entrypoint.sh"]
@@ -91,8 +91,9 @@ services:
     <<: *runtime
     environment:
       APP_ENV: executor
+      DATABASE_URL: sqlite+aiosqlite:////data/weatheredge.db
       EXECUTION_ENABLED: "false"
-      FORECASTFOUNDRY_DATABASE_URL: sqlite+aiosqlite:////data/weatheredge.db
+
     volumes:
       - weatheredge-data:/data
     depends_on:
